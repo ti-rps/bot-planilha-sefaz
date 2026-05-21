@@ -18,6 +18,7 @@ from tkinter import ttk
 from tkinter import messagebox
 from tkcalendar import DateEntry
 from gspread.exceptions import APIError # Se você não estiver usando gspread diretamente aqui, pode ser removido.
+from errors import BotPlanilhaError, InvalidParametersError
 
 load_dotenv()
 
@@ -78,82 +79,174 @@ def configurar_estilo():
     estilo.configure('TLabel', font=('Arial', 12), background='#F0F0F0')
     estilo.configure('TEntry', font=('Arial', 12))
 
-# MODIFICADO PARA CORRIGIR AttributeError: 'int' object has no attribute 'strip'
 def processar_empresa(row_data, data_inicial, data_final, destinatario, remetente, dir_temp, driver, wait, run_id=None):
-    # row_data é uma série do Pandas (empresa_df.iloc[0])
     login_val = lp.get_login(logger, row_data)
     senha_val = lp.get_senha(logger, row_data)
-    razao_social = lp.get_empresa(logger, row_data) # Supondo que razao_social já seja string
+    razao_social = lp.get_empresa(logger, row_data)
 
-    # ***** INÍCIO DA MODIFICAÇÃO IMPORTANTE *****
-    # Garante que login e senha sejam strings antes de usar .strip()
-    # Se o valor original for None, converte para uma string vazia.
     login_str = str(login_val) if login_val is not None else ""
     senha_str = str(senha_val) if senha_val is not None else ""
-    # ***** FIM DA MODIFICAÇÃO IMPORTANTE *****
 
-    # Agora use login_str e senha_str para as verificações e para passar para bs.download
-    # A condição "if senha_str and login_str:" implicitamente verifica se não são vazias
-    # e .strip() != '' verifica se não são apenas espaços em branco.
-    if senha_str.strip() != '' and login_str.strip() != '':
-        if destinatario:
-            logger.info(f"Baixando como Destinatário para a empresa {razao_social}")
-            # Passa login_str e senha_str
-            bs.download(logger, row_data, razao_social, login_str, senha_str, data_inicial, data_final, dir_temp, tipo="destinatario", driver=driver, wait=wait, run_id=run_id)
-        if remetente:
-            logger.info(f"Baixando como Remetente para a empresa {razao_social}")
-            # Passa login_str e senha_str
-            bs.download(logger, row_data, razao_social, login_str, senha_str, data_inicial, data_final, dir_temp, tipo="remetente", driver=driver, wait=wait, run_id=run_id)
-    else:
-        # Lógica para mensagem de erro melhorada
-        mensagem_erro_detalhada = f"Configuração incompleta para {razao_social}: "
+    if not (login_str.strip() and senha_str.strip()):
         if not login_str.strip() and not senha_str.strip():
-            mensagem_erro_detalhada += "Login e Senha não encontrados."
+            motivo = "Login e Senha vazios"
         elif not login_str.strip():
-            mensagem_erro_detalhada += "Login não encontrado."
-        elif not senha_str.strip():
-            mensagem_erro_detalhada += "Senha não encontrada."
-        else: # Caso um deles seja apenas espaços em branco, mas não ambos vazios
-            mensagem_erro_detalhada = f"Login e/ou Senha inválidos (apenas espaços?) para {razao_social}."
+            motivo = "Login vazio"
+        else:
+            motivo = "Senha vazia"
+        raise InvalidParametersError(
+            f"Credenciais ausentes na Sheet para {razao_social}: {motivo}",
+            empresa=razao_social,
+        )
+
+    if not (destinatario or remetente):
+        raise InvalidParametersError(
+            f"Nenhum tipo selecionado (destinatário/remetente) para {razao_social}",
+            empresa=razao_social,
+        )
+
+    resultados = []
+    if destinatario:
+        logger.info(f"Baixando como Destinatário para a empresa {razao_social}")
+        resultados.append(bs.download(logger, row_data, razao_social, login_str, senha_str, data_inicial, data_final, dir_temp, tipo="destinatario", driver=driver, wait=wait, run_id=run_id))
+    if remetente:
+        logger.info(f"Baixando como Remetente para a empresa {razao_social}")
+        resultados.append(bs.download(logger, row_data, razao_social, login_str, senha_str, data_inicial, data_final, dir_temp, tipo="remetente", driver=driver, wait=wait, run_id=run_id))
+
+    # Empresa = ok se algum download trouxe dados; no_data se todos vieram sem dados.
+    return "ok" if "ok" in resultados else "no_data"
 
 
-        logger.error(mensagem_erro_detalhada)
-        # Envia o evento para a fila da GUI em vez de chamar messagebox diretamente
-        gui_event_queue.put(("show_warning", ("Atenção", mensagem_erro_detalhada)))
+def _resultado_empresa(razao_social, *, status, error_class=None, error_type=None, message=None, actionable=False):
+    return {
+        "empresa": razao_social,
+        "status": status,
+        "error_class": error_class,
+        "error_type": error_type,
+        "message": message,
+        "actionable": actionable,
+    }
+
+
+_SISTEMICAS_INFRA = {"IP_BLOCKED", "PORTAL_DOWN", "INFRA_DESTINO_INDISPONIVEL", "RATE_LIMITED"}
+
+
+def _classificar_run(summary):
+    """Decide (status, error_class, partial_success) a partir do summary.
+
+    Mapeia pros 4 status terminais do Maestro:
+      - tudo ok                            → completed
+      - tudo no_data                       → completed_no_invoices
+      - todas falharam, mesma error_class  → failed (com aquela error_class)
+      - misto                              → completed + partial_success=True (PARTIAL_FAILURE)
+    """
+    n_ok = len(summary["ok"])
+    n_no_data = len(summary["no_data"])
+    n_failed = len(summary["failed"])
+    total = n_ok + n_no_data + n_failed
+
+    if total == 0:
+        return ("failed", "UNKNOWN", False)
+
+    if n_failed == 0:
+        if n_ok > 0:
+            return ("completed", None, False)
+        return ("completed_no_invoices", None, False)
+
+    if n_failed == total:
+        classes = {f["error_class"] for f in summary["failed"]}
+        if len(classes) == 1:
+            return ("failed", classes.pop(), False)
+        if classes.issubset(_SISTEMICAS_INFRA):
+            return ("failed", "PORTAL_DOWN", False)
+        return ("failed", "UNKNOWN", False)
+
+    return ("completed", "PARTIAL_FAILURE", True)
+
+
+def _formatar_mensagem_summary(summary, status, error_class, partial_success, relatorio_path):
+    n_ok = len(summary["ok"])
+    n_no_data = len(summary["no_data"])
+    n_failed = len(summary["failed"])
+    total = n_ok + n_no_data + n_failed
+
+    linhas = [f"Status: {status}" + (" (parcial)" if partial_success else "")]
+    if error_class:
+        linhas.append(f"Categoria: {error_class}")
+    linhas.append(f"Total: {total} empresa(s)")
+    linhas.append(f"  OK: {n_ok}")
+    linhas.append(f"  Sem dados: {n_no_data}")
+    linhas.append(f"  Falhas: {n_failed}")
+
+    if summary["failed"]:
+        linhas.append("")
+        linhas.append("Falhas:")
+        for f in summary["failed"][:10]:
+            linhas.append(f"  - {f['empresa']} [{f['error_class']}]: {f['message']}")
+        if len(summary["failed"]) > 10:
+            linhas.append(f"  ... e mais {len(summary['failed']) - 10}.")
+
+    if relatorio_path:
+        linhas.append("")
+        linhas.append(f"Relatório: {relatorio_path}")
+    return "\n".join(linhas)
+
 
 def processar_empresa_thread(empresa_values, data_inicial, data_final, destinatario_selecionado, remetente_selecionado, run_id=None):
     razao_social = empresa_values[1]
 
     if df is None:
         logger.error("DataFrame global 'df' não está carregado.")
-        return (razao_social, "Erro interno: DataFrame não carregado")
+        return _resultado_empresa(razao_social, status="failed",
+                                  error_class="INVALID_PARAMETERS",
+                                  error_type="RuntimeError",
+                                  message="DataFrame global de empresas não carregado",
+                                  actionable=True)
 
     empresa_df_row_results = df[df['RAZÃO SOCIAL'] == razao_social]
-
-    if not empresa_df_row_results.empty:
-        empresa_data_series = empresa_df_row_results.iloc[0] # Pega a primeira linha como uma Series
-        dir_temp = str(uuid.uuid4())
-        download_dir_thread = os.path.join("downloads", dir_temp)
-        os.makedirs(download_dir_thread, exist_ok=True)
-
-        driver_instance = None
-        try:
-            driver_instance, wait_instance = bs.configurar_driver(logger, download_dir_thread)
-            processar_empresa(empresa_data_series, data_inicial, data_final, destinatario_selecionado, remetente_selecionado, dir_temp, driver_instance, wait_instance, run_id=run_id)
-            return (razao_social, None)
-        except Exception as e:
-            logger.exception(f"Erro ao processar a empresa {razao_social} na thread: {e}")
-            return (razao_social, str(e))
-        finally:
-            if driver_instance:
-                try:
-                    driver_instance.quit()
-                    logger.info(f"Driver para {razao_social} finalizado.")
-                except Exception as e_quit:
-                    logger.error(f"Erro ao tentar fechar o driver para {razao_social}: {e_quit}")
-    else:
+    if empresa_df_row_results.empty:
         logger.error(f"Empresa {razao_social} não encontrada no DataFrame (dentro da thread).")
-        return (razao_social, "Empresa não encontrada no DataFrame")
+        return _resultado_empresa(razao_social, status="failed",
+                                  error_class="INVALID_PARAMETERS",
+                                  error_type="LookupError",
+                                  message=f"Empresa {razao_social} não encontrada na Sheet",
+                                  actionable=True)
+
+    empresa_data_series = empresa_df_row_results.iloc[0]
+    dir_temp = str(uuid.uuid4())
+    download_dir_thread = os.path.join("downloads", dir_temp)
+    os.makedirs(download_dir_thread, exist_ok=True)
+
+    driver_instance = None
+    try:
+        driver_instance, wait_instance = bs.configurar_driver(logger, download_dir_thread)
+        empresa_status = processar_empresa(
+            empresa_data_series, data_inicial, data_final,
+            destinatario_selecionado, remetente_selecionado,
+            dir_temp, driver_instance, wait_instance, run_id=run_id,
+        )
+        return _resultado_empresa(razao_social, status=empresa_status)
+    except BotPlanilhaError as e:
+        logger.error(f"[{e.error_class}] {razao_social}: {e.message}")
+        return _resultado_empresa(razao_social, status="failed",
+                                  error_class=e.error_class,
+                                  error_type=type(e).__name__,
+                                  message=e.message,
+                                  actionable=e.actionable)
+    except Exception as e:
+        logger.exception(f"Erro inesperado ao processar {razao_social} na thread")
+        return _resultado_empresa(razao_social, status="failed",
+                                  error_class="UNKNOWN",
+                                  error_type=type(e).__name__,
+                                  message=str(e),
+                                  actionable=False)
+    finally:
+        if driver_instance:
+            try:
+                driver_instance.quit()
+                logger.info(f"Driver para {razao_social} finalizado.")
+            except Exception as e_quit:
+                logger.error(f"Erro ao tentar fechar o driver para {razao_social}: {e_quit}")
 
 
 def carregar_empresas(dataframe_local, sort_column=None, reverse=False):
@@ -426,7 +519,7 @@ def mostrar_menu():
                             "destinatario": destinatario_bool,
                             "remetente": remetente_bool})
 
-        empresas_com_erro_list_final = []
+        summary = {"ok": [], "failed": [], "no_data": [], "skipped": []}
         progress['value'] = 0
         progress['maximum'] = total_empresas
         if root: root.update_idletasks()
@@ -436,28 +529,26 @@ def mostrar_menu():
         def on_all_threads_done_callback():
             limpar_diretorio_downloads_temporarios()
 
-            # Gera relatório agregado do run
             try:
                 relatorio_path = diag.gerar_relatorio(run_id, max_workers, total_empresas)
             except Exception as e_rel:
                 logger.error(f"Falha ao gerar relatório do run {run_id}: {e_rel}")
                 relatorio_path = None
-            diag.evento(run_id, None, None, "batch", "end",
-                        extras={"falhas": len(empresas_com_erro_list_final)})
 
-            if empresas_com_erro_list_final:
-                msg_final_str = f"Processo concluído com erros para {len(empresas_com_erro_list_final)} empresa(s).\n"
-                msg_final_str += "Detalhes nos logs.\nEmpresas com erro:\n" + "\n".join(empresas_com_erro_list_final[:5])
-                if len(empresas_com_erro_list_final) > 5:
-                    msg_final_str += f"\n... e mais {len(empresas_com_erro_list_final) - 5}."
-                if relatorio_path:
-                    msg_final_str += f"\n\nRelatório: {relatorio_path}"
-                messagebox.showinfo("Processo Concluído", msg_final_str)
-            else:
-                msg_ok = f"Processo concluído sem erros para as {total_empresas} empresa(s) selecionada(s)."
-                if relatorio_path:
-                    msg_ok += f"\n\nRelatório: {relatorio_path}"
-                messagebox.showinfo("Processo Concluído", msg_ok)
+            status, error_class, partial_success = _classificar_run(summary)
+            diag.evento(run_id, None, None, "batch", "end",
+                        extras={"status": status,
+                                "error_class": error_class,
+                                "partial_success": partial_success,
+                                "ok": len(summary["ok"]),
+                                "no_data": len(summary["no_data"]),
+                                "failed": len(summary["failed"])})
+            logger.info(f"[diag] run_id={run_id} status={status} error_class={error_class} partial={partial_success}")
+
+            messagebox.showinfo(
+                "Processo Concluído",
+                _formatar_mensagem_summary(summary, status, error_class, partial_success, relatorio_path),
+            )
 
             progress['value'] = 0
             if btn_consultar: btn_consultar.config(state=tk.NORMAL)
@@ -474,21 +565,34 @@ def mostrar_menu():
                 for future in concurrent.futures.as_completed(future_to_razao):
                     razao_social_key = future_to_razao[future]
                     try:
-                        _, erro_msg = future.result()
-                        if erro_msg:
-                            empresas_com_erro_list_final.append(f"{razao_social_key}: {erro_msg}")
-                            if logger: logger.error(f"Erro retornado ao processar {razao_social_key}: {erro_msg}")
+                        resultado = future.result()
+                        if resultado["status"] == "ok":
+                            summary["ok"].append(resultado["empresa"])
+                            logger.info(f"Empresa {razao_social_key} processada com sucesso.")
+                        elif resultado["status"] == "no_data":
+                            summary["no_data"].append(resultado["empresa"])
+                            logger.info(f"Empresa {razao_social_key} concluída sem dados.")
                         else:
-                            if logger: logger.info(f"Empresa {razao_social_key} processada com sucesso pela thread.")
+                            summary["failed"].append({
+                                "empresa": resultado["empresa"],
+                                "error_class": resultado["error_class"],
+                                "error_type": resultado["error_type"],
+                                "message": resultado["message"],
+                            })
+                            logger.error(f"[{resultado['error_class']}] {razao_social_key}: {resultado['message']}")
                     except Exception as exc_f:
-                        if logger: logger.error(f"Exceção ao obter resultado da future para {razao_social_key}: {exc_f}", exc_info=True)
-                        empresas_com_erro_list_final.append(f"{razao_social_key}: erro na future ({exc_f})")
+                        logger.error(f"Exceção ao obter resultado da future para {razao_social_key}: {exc_f}", exc_info=True)
+                        summary["failed"].append({
+                            "empresa": razao_social_key,
+                            "error_class": "UNKNOWN",
+                            "error_type": type(exc_f).__name__,
+                            "message": str(exc_f),
+                        })
 
                     processed_count['value'] += 1
                     progress['value'] = processed_count['value']
                     if root: root.update_idletasks()
 
-            # Todas as futures completaram, chama o callback na thread principal
             if root: root.after(0, on_all_threads_done_callback)
 
         # Iniciar a submissão e monitoramento de tarefas em uma nova thread

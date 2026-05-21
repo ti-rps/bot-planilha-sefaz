@@ -12,6 +12,12 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import NoSuchElementException, TimeoutException
 
 import diagnostico as diag
+from errors import (
+    BotPlanilhaError,
+    CaptchaFailedError,
+    CredentialInvalidError,
+    ShareUnavailableError,
+)
 
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service as ChromeService
@@ -122,17 +128,23 @@ def fazer_login(driver, razao_social, wait, logger, login, senha, run_id=None, t
             WebDriverWait(driver, 2).until(
                 EC.visibility_of_element_located((By.ID, 'msgDetalhesErro'))
             )
-            logger.error(f"Usuário ou senha inválidos para a empresa {razao_social}. Apagando a senha e retornando.")
-            diag.evento(run_id, razao_social, tipo, "login", "fail",
-                        erro="credenciais_invalidas",
-                        extras={"motivo": "msgDetalhesErro visivel"})
-            diag.salvar_evidencia(driver, run_id, razao_social, tipo, "login", sufixo="credenciais_invalidas")
-            return False  # Login falhou
         except TimeoutException:
             logger.info("Login realizado com sucesso")
             diag.evento(run_id, razao_social, tipo, "login", "ok")
-            return True  # Login bem-sucedido
+            return True
 
+        logger.error(f"Usuário ou senha inválidos para a empresa {razao_social}.")
+        diag.evento(run_id, razao_social, tipo, "login", "fail",
+                    erro="credenciais_invalidas",
+                    extras={"motivo": "msgDetalhesErro visivel"})
+        diag.salvar_evidencia(driver, run_id, razao_social, tipo, "login", sufixo="credenciais_invalidas")
+        raise CredentialInvalidError(
+            f"Usuário ou senha inválidos no portal SEFAZ para a empresa {razao_social}",
+            empresa=razao_social,
+        )
+
+    except BotPlanilhaError:
+        raise
     except Exception as e:
         logger.error(f"Erro ao tentar fazer login: {e}")
         diag.evento(run_id, razao_social, tipo, "login", "fail",
@@ -182,7 +194,10 @@ def preencher_formulario(driver, wait, logger, data_inicio, data_fim, pasta_mes_
             time.sleep(2)
         else:
             diag.salvar_evidencia(driver, run_id, razao_social, tipo, "captcha", sufixo="esgotado")
-            raise Exception("Falha ao resolver CAPTCHA após 3 tentativas")
+            raise CaptchaFailedError(
+                f"Falha ao resolver CAPTCHA após 3 tentativas para {razao_social}",
+                empresa=razao_social,
+            )
 
         btn_consultar = wait.until(EC.presence_of_element_located((By.ID, 'AplicarFiltro')))
         btn_consultar.click()
@@ -240,6 +255,8 @@ def preencher_formulario(driver, wait, logger, data_inicio, data_fim, pasta_mes_
     except TimeoutException:
         logger.error("Erro ao preencher o formulário: elemento não encontrado")
         diag.salvar_evidencia(driver, run_id, razao_social, tipo, "preencher_formulario", sufixo="timeout")
+        raise
+    except BotPlanilhaError:
         raise
     except Exception as e:
         logger.error(f"Erro ao preencher o formulário: {e}")
@@ -389,7 +406,7 @@ def _destino_base():
     # cria silenciosamente uma pasta "R:" no cwd quando o share não está montado.
     base = os.getenv("DESTINO_BASE", r"R:\FISCAL\00 PLANILHA SEFAZ")
     if not os.path.isdir(base):
-        raise FileNotFoundError(
+        raise ShareUnavailableError(
             f"DESTINO_BASE não existe ou não é diretório: '{base}'. "
             "No Windows confira o mapeamento do R:. No WSL/container, "
             "monte o share \\\\SRVDOC01\\REDE no path apontado por DESTINO_BASE."
@@ -421,16 +438,30 @@ def move_planilha(logger, razao_social, caminho_arquivo_baixado, data_inicio):
         pasta_ano = os.path.join(pasta_empresa, ano)
         pasta_mes_ano = os.path.join(pasta_ano, mes_ano)
 
-        os.makedirs(pasta_mes_ano, exist_ok=True)
+        try:
+            os.makedirs(pasta_mes_ano, exist_ok=True)
+        except OSError as e:
+            raise ShareUnavailableError(
+                f"Falha ao criar pasta destino '{pasta_mes_ano}' — share pode ter caído: {e}",
+                empresa=razao_social,
+            ) from e
 
         nome_arquivo = os.path.basename(caminho_arquivo_baixado)
         caminho_novo_arquivo = os.path.join(pasta_mes_ano, nome_arquivo)
 
         verificar_download(caminho_arquivo_baixado)
 
-        shutil.move(caminho_arquivo_baixado, caminho_novo_arquivo)
+        try:
+            shutil.move(caminho_arquivo_baixado, caminho_novo_arquivo)
+        except OSError as e:
+            raise ShareUnavailableError(
+                f"Falha ao mover arquivo para '{caminho_novo_arquivo}' — share pode ter caído: {e}",
+                empresa=razao_social,
+            ) from e
 
         logger.info(f"Arquivo movido para: {caminho_novo_arquivo}")
+    except BotPlanilhaError:
+        raise
     except FileNotFoundError:
         logger.error("Arquivo não encontrado na pasta de downloads")
         raise
@@ -482,33 +513,28 @@ def download(logger, row, razao_social, login, senha, data_inicio, data_fim, dir
 
         diag.evento(run_id, razao_social_sanitizada, tipo, "abrir_site", "ok")
 
-        fez_login = fazer_login(driver_instance, razao_social_sanitizada, wait, logger,
-                                login, senha, run_id=run_id, tipo=tipo)
+        fazer_login(driver_instance, razao_social_sanitizada, wait, logger,
+                    login, senha, run_id=run_id, tipo=tipo)
 
-        if fez_login:
-            pasta_mes_ano = definir_pasta_mes_ano(razao_social_sanitizada, data_inicio)
-            retornou_dados = preencher_formulario(driver_instance, wait, logger,
-                                                  data_inicio, data_fim, pasta_mes_ano, tipo,
-                                                  razao_social=razao_social_sanitizada, run_id=run_id)
-            if retornou_dados:
-                 caminho_arquivo_baixado = baixar_planilha(driver_instance, wait, logger,
-                                                           razao_social_sanitizada, tipo_consulta,
-                                                           download_dir, data_inicio, run_id=run_id)
-                 with diag.fase(run_id, razao_social_sanitizada, tipo, "mover_arquivo"):
-                     move_planilha(logger, razao_social_sanitizada, caminho_arquivo_baixado, data_inicio)
-                 diag.evento(run_id, razao_social_sanitizada, tipo, "job", "ok",
-                             duracao_ms=int((time.monotonic() - inicio_job) * 1000))
-            else:
-                 logger.info(f"Nenhum dado encontrado para a consulta {tipo.upper()} da empresa {razao_social_sanitizada}.")
-                 diag.evento(run_id, razao_social_sanitizada, tipo, "job", "ok",
-                             duracao_ms=int((time.monotonic() - inicio_job) * 1000),
-                             extras={"resultado": "sem_dados"})
+        pasta_mes_ano = definir_pasta_mes_ano(razao_social_sanitizada, data_inicio)
+        retornou_dados = preencher_formulario(driver_instance, wait, logger,
+                                              data_inicio, data_fim, pasta_mes_ano, tipo,
+                                              razao_social=razao_social_sanitizada, run_id=run_id)
+        if retornou_dados:
+            caminho_arquivo_baixado = baixar_planilha(driver_instance, wait, logger,
+                                                     razao_social_sanitizada, tipo_consulta,
+                                                     download_dir, data_inicio, run_id=run_id)
+            with diag.fase(run_id, razao_social_sanitizada, tipo, "mover_arquivo"):
+                move_planilha(logger, razao_social_sanitizada, caminho_arquivo_baixado, data_inicio)
+            diag.evento(run_id, razao_social_sanitizada, tipo, "job", "ok",
+                        duracao_ms=int((time.monotonic() - inicio_job) * 1000))
+            return "ok"
         else:
-            logger.error(f"Erro de login para a empresa {razao_social_sanitizada} (tipo: {tipo}). Senha pode estar incorreta.")
-            diag.evento(run_id, razao_social_sanitizada, tipo, "job", "fail",
+            logger.info(f"Nenhum dado encontrado para a consulta {tipo.upper()} da empresa {razao_social_sanitizada}.")
+            diag.evento(run_id, razao_social_sanitizada, tipo, "job", "ok",
                         duracao_ms=int((time.monotonic() - inicio_job) * 1000),
-                        erro="login_falhou",
-                        extras={"motivo": "credenciais_invalidas"})
+                        extras={"resultado": "sem_dados"})
+            return "no_data"
 
     except Exception as e:
         logger.error(f"Erro no processo de download para a empresa {razao_social_sanitizada} (tipo: {tipo}): {e}")
