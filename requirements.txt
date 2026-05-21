@@ -1,0 +1,21 @@
+# requirements.txt
+
+# Data manipulation and analysis
+pandas
+
+# Google Sheets API client
+gspread
+oauth2client
+
+# Web browser automation
+selenium
+webdriver-manager # <-- ADICIONE ESTA LINHA
+
+# Environment variable management
+python-dotenv
+
+# CAPTCHA solving library/service client
+capsolver
+
+# GUI Calendar widget for tkinter
+tkcalendar
