@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Secrets / credentials
+.env
+credentials/
+
+# Runtime artifacts
+log/
+downloads/
+temp_captcha/
+webdriver/
+
+# Backups
+*.bak
+
+# Claude Code per-instance settings
+.claude/settings.local.json
+
+# Windows artifacts (Thumbs.db cache, NTFS Zone.Identifier alt streams)
+Thumbs.db*
+*:Zone.Identifier
