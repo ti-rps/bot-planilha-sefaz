@@ -1,19 +1,35 @@
-"""Backend compartilhado entre GUI (main.py) e CLI (cli.py).
+"""Backend compartilhado entre GUI (main.py), CLI (cli.py) e worker (FASE 5).
 
 Sem globals, sem dependência de UI. Toda função recebe explicitamente
-`df` e `logger`. Quem chama (GUI ou CLI) é responsável por carregar a
-Sheet e configurar o logger.
+`df` e `logger`. Quem chama (GUI/CLI/Maestro) é responsável por carregar
+a Sheet e configurar o logger.
 
 `run_batch` é o entry point único: pool de threads + agregação canônica
 do summary + classificação dos 4 status terminais do rps-maestro.
+
+Para integração com o rps-maestro (FASE 4), `run_batch` aceita dois kwargs
+opcionais (default None — CLI/GUI não passam):
+
+- `on_log`: callback `(level, message, actionable)` chamado em pontos chave
+  (~3-5 linhas/empresa). Espelha o padrão do bot-xml-gms: poucos logs no
+  Maestro, DEBUG denso fica no log/ local.
+- `cancel_event`: `threading.Event` setado pelo CancellationWatcher. Quando
+  set durante a coleta, `run_batch` cancela futures pending e devolve
+  `status="canceled"` com `summary["processed_before_cancel"]` populado.
 """
-import os
-import uuid
 import concurrent.futures
+import os
+import threading
+import uuid
+from datetime import datetime, timezone
+from typing import Callable, Optional
 
 import baixar_planilha_sefaz as bs
 import ler_planilha as lp
 from errors import BotPlanilhaError, InvalidParametersError
+
+
+OnLog = Callable[[str, str, bool], None]
 
 
 _SISTEMICAS_INFRA = {"IP_BLOCKED", "PORTAL_DOWN", "INFRA_DESTINO_INDISPONIVEL", "RATE_LIMITED"}
@@ -124,15 +140,19 @@ def processar_empresa_thread(empresa_values, data_inicial, data_final, destinata
                 logger.error(f"Erro ao tentar fechar o driver para {razao_social}: {e_quit}")
 
 
-def classificar_run(summary):
+def classificar_run(summary, *, canceled: bool = False):
     """Decide (status, error_class, partial_success) a partir do summary.
 
     Mapeia pros 4 status terminais do rps-maestro:
+      - canceled=True (cancel_event acionado durante o batch) → canceled
       - tudo ok                            → completed
       - tudo no_data                       → completed_no_invoices
       - todas falharam, mesma error_class  → failed (com aquela error_class)
       - misto                              → completed + partial_success=True (PARTIAL_FAILURE)
     """
+    if canceled:
+        return ("canceled", None, False)
+
     n_ok = len(summary["ok"])
     n_no_data = len(summary["no_data"])
     n_failed = len(summary["failed"])
@@ -185,7 +205,30 @@ def formatar_mensagem_summary(summary, status, error_class, partial_success, rel
     return "\n".join(linhas)
 
 
-def run_batch(empresas_list, data_inicial, data_final, destinatario, remetente, df, logger, *, max_workers=3, run_id=None, progress_callback=None):
+def _safe_on_log(on_log: Optional[OnLog], level: str, message: str, actionable: bool, logger):
+    if on_log is None:
+        return
+    try:
+        on_log(level, message, actionable)
+    except Exception as cb_err:
+        logger.warning(f"on_log levantou exceção (ignorando): {cb_err}")
+
+
+def run_batch(
+    empresas_list,
+    data_inicial,
+    data_final,
+    destinatario,
+    remetente,
+    df,
+    logger,
+    *,
+    max_workers=3,
+    run_id=None,
+    progress_callback=None,
+    on_log: Optional[OnLog] = None,
+    cancel_event: Optional[threading.Event] = None,
+):
     """Roda o batch de empresas em pool de threads e devolve a tupla canônica.
 
     Args:
@@ -200,14 +243,23 @@ def run_batch(empresas_list, data_inicial, data_final, destinatario, remetente, 
         progress_callback: opcional fn(processed: int, total: int). Chamada a
             cada empresa concluída pra UIs atualizarem progress bar. NÃO usar
             pra mutar Tkinter direto — encapsular com root.after se for GUI.
+        on_log: opcional callback (level, message, actionable). Quando passado,
+            run_batch emite ~3 linhas por empresa (start/end + erro com
+            actionable propagado do BotPlanilhaError). Espelha o padrão do
+            bot-xml-gms. CLI/GUI passam None.
+        cancel_event: opcional threading.Event. Quando set durante a coleta,
+            run_batch cancela futures pending (empresas não iniciadas), aguarda
+            as in-flight terminarem e devolve status="canceled". As empresas
+            concluídas até o cancel viram summary["processed_before_cancel"].
 
     Returns:
         (summary, status, error_class, partial_success):
         - summary: {"ok": [str], "failed": [{empresa, error_class, error_type, message}],
                     "no_data": [str], "skipped": [str]} — shape canônica do rps-maestro.
+                    Quando cancelado, ganha "processed_before_cancel": [str] e
+                    "canceled_at": isoformat UTC.
         - status, error_class, partial_success: ver classificar_run.
     """
-    # Import lazy pra evitar circularidade no diag (ele importa runner em alguns paths? a checar)
     import diagnostico as diag
 
     if run_id is None:
@@ -216,12 +268,15 @@ def run_batch(empresas_list, data_inicial, data_final, destinatario, remetente, 
     summary = {"ok": [], "failed": [], "no_data": [], "skipped": []}
     total = len(empresas_list)
     processed = 0
+    canceled = False
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_razao = {
             executor.submit(processar_empresa_thread, ev, data_inicial, data_final, destinatario, remetente, df, logger, run_id): ev[1]
             for ev in empresas_list
         }
+
+        _safe_on_log(on_log, "INFO", f"Processando {total} empresa(s) | workers={max_workers}", False, logger)
 
         for future in concurrent.futures.as_completed(future_to_razao):
             razao_social_key = future_to_razao[future]
@@ -230,9 +285,11 @@ def run_batch(empresas_list, data_inicial, data_final, destinatario, remetente, 
                 if resultado["status"] == "ok":
                     summary["ok"].append(resultado["empresa"])
                     logger.info(f"Empresa {razao_social_key} processada com sucesso.")
+                    _safe_on_log(on_log, "INFO", f"OK: {razao_social_key}", False, logger)
                 elif resultado["status"] == "no_data":
                     summary["no_data"].append(resultado["empresa"])
                     logger.info(f"Empresa {razao_social_key} concluída sem dados.")
+                    _safe_on_log(on_log, "INFO", f"Sem dados: {razao_social_key}", False, logger)
                 else:
                     summary["failed"].append({
                         "empresa": resultado["empresa"],
@@ -241,6 +298,17 @@ def run_batch(empresas_list, data_inicial, data_final, destinatario, remetente, 
                         "message": resultado["message"],
                     })
                     logger.error(f"[{resultado['error_class']}] {razao_social_key}: {resultado['message']}")
+                    _safe_on_log(
+                        on_log, "ERROR",
+                        f"[{resultado['error_class']}] {razao_social_key}: {resultado['message']}",
+                        bool(resultado.get("actionable", False)), logger,
+                    )
+            except concurrent.futures.CancelledError:
+                # Future foi cancelada pelo cancel_event abaixo. Não conta como
+                # falha — vai pra skipped pra rastreio (não aparece em failed).
+                summary["skipped"].append(razao_social_key)
+                logger.info(f"Empresa {razao_social_key} cancelada antes de iniciar.")
+                continue
             except Exception as exc_f:
                 logger.error(f"Exceção ao obter resultado da future para {razao_social_key}: {exc_f}", exc_info=True)
                 summary["failed"].append({
@@ -249,6 +317,7 @@ def run_batch(empresas_list, data_inicial, data_final, destinatario, remetente, 
                     "error_type": type(exc_f).__name__,
                     "message": str(exc_f),
                 })
+                _safe_on_log(on_log, "ERROR", f"[UNKNOWN] {razao_social_key}: {exc_f}", False, logger)
 
             processed += 1
             if progress_callback:
@@ -257,5 +326,25 @@ def run_batch(empresas_list, data_inicial, data_final, destinatario, remetente, 
                 except Exception as cb_err:
                     logger.warning(f"progress_callback levantou exceção (ignorando): {cb_err}")
 
-    status, error_class, partial_success = classificar_run(summary)
+            if cancel_event is not None and cancel_event.is_set() and not canceled:
+                canceled = True
+                pending = [f for f in future_to_razao if not f.done()]
+                cancelled_count = sum(1 for f in pending if f.cancel())
+                logger.warning(
+                    f"Cancelamento solicitado: {cancelled_count}/{len(pending)} futures pending canceladas; "
+                    f"aguardando in-flight terminar."
+                )
+                _safe_on_log(
+                    on_log, "WARNING",
+                    "Cancelamento solicitado. Aguardando empresa(s) em andamento.",
+                    False, logger,
+                )
+
+    if canceled:
+        summary["processed_before_cancel"] = (
+            list(summary["ok"]) + list(summary["no_data"]) + [f["empresa"] for f in summary["failed"]]
+        )
+        summary["canceled_at"] = datetime.now(timezone.utc).isoformat()
+
+    status, error_class, partial_success = classificar_run(summary, canceled=canceled)
     return summary, status, error_class, partial_success
