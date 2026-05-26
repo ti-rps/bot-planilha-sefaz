@@ -38,6 +38,7 @@ import time
 import diagnostico as diag
 import ler_planilha as lp
 import runner
+from empresa_resolver import resolver_empresas
 
 
 _DATE_PATTERN = re.compile(r"^\d{2}/\d{2}/\d{4}$")
@@ -60,46 +61,6 @@ def configurar_logger(verbose: bool) -> logging.Logger:
         force=True,
     )
     return logging.getLogger("cli")
-
-
-def resolver_empresas(df, identifiers, todas_ativas: bool, logger):
-    """Resolve identifiers (códigos ou substring de razão social) → list de tuples.
-
-    Cada tuple tem o shape (Código, RAZÃO SOCIAL, CNPJ, Status, Contribuinte) —
-    mesmo formato que a GUI passa via treeview.item(id, 'values').
-    """
-    if todas_ativas:
-        rows = []
-        for _, row in df.iterrows():
-            senha_robo = str(row.get("Senha Robô", "")).strip()
-            if senha_robo:
-                rows.append(row)
-        if not rows:
-            sys.exit("ERRO: nenhuma empresa com 'Senha Robô' preenchida na Sheet")
-    else:
-        rows = []
-        for ident in identifiers:
-            ident_low = ident.lower().strip()
-            match = df[df["Código"].astype(str).str.lower() == ident_low]
-            if match.empty:
-                match = df[df["RAZÃO SOCIAL"].astype(str).str.lower().str.contains(ident_low, na=False)]
-            if match.empty:
-                sys.exit(f"ERRO: nenhuma empresa bateu com '{ident}'")
-            if len(match) > 1:
-                nomes = match["RAZÃO SOCIAL"].astype(str).tolist()[:5]
-                sys.exit(f"ERRO: '{ident}' é ambíguo ({len(match)} matches): " + ", ".join(nomes))
-            rows.append(match.iloc[0])
-
-    out = []
-    for r in rows:
-        codigo = str(r.get("Código", ""))
-        razao = str(r.get("RAZÃO SOCIAL", ""))
-        cnpj = str(r.get("CNPJ", ""))
-        senha_robo = str(r.get("Senha Robô", "")).strip()
-        status_text = "Disponível" if senha_robo else "Indisponível"
-        contrib = "Sim" if r.get("Contribuinte") == "S" else "Não"
-        out.append((codigo, razao, cnpj, status_text, contrib))
-    return out
 
 
 def parse_args():
