@@ -1,0 +1,30 @@
+# Segredos — montados como volume/env_file, nunca embutidos na imagem
+.env
+.env.*
+!.env.example
+credentials/
+
+# Runtime artifacts
+log/
+downloads/
+temp_captcha/
+webdriver/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Git / dev
+.git/
+.gitignore
+.claude/
+*.bak
+
+# GUI-only / não usado pelo worker
+img/
+
+# Windows artifacts
+Thumbs.db*
+*:Zone.Identifier

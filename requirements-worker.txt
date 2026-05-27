@@ -1,0 +1,28 @@
+# Dependências do worker headless (container Docker — FASE 6).
+# Espelha requirements.txt MENOS as deps de GUI (tkcalendar/tkinter), que o
+# worker e a CLI nunca importam. Não usar em ambiente desktop com a Tkinter.
+
+# Manipulação de dados
+pandas
+
+# Cliente Google Sheets
+gspread
+oauth2client
+
+# Automação de navegador
+selenium
+# Importado no topo de baixar_planilha_sefaz.py mesmo quando CHROMEDRIVER_PATH
+# está setado (o import é incondicional) — manter mesmo sem uso em runtime.
+webdriver-manager
+
+# Variáveis de ambiente
+python-dotenv
+
+# HTTP (Maestro worker API + Capsolver)
+requests
+
+# Consumer RabbitMQ
+pika
+
+# Resolução de CAPTCHA
+capsolver
