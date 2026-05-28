@@ -16,6 +16,9 @@ from errors import (
     BotPlanilhaError,
     CaptchaFailedError,
     CredentialInvalidError,
+    IpBlockedError,
+    JobTimeoutError,
+    PortalDownError,
     ShareUnavailableError,
 )
 
@@ -83,19 +86,15 @@ def configurar_driver(logger, download_dir):
         logger.error(f"Erro ao configurar o ChromeDriver: {e}")
         raise
 
-def abrir_sefaz_dest(driver, logger):
+def abrir_sefaz_dest(driver, logger, razao_social=None):
     sefaz_dest = os.getenv('SEFAZ_DEST')
     driver.get(sefaz_dest)
-    # Verificar se há erro no site
-    if verificar_erro_site(driver, logger):
-        raise Exception("Erro detectado no site: Falha de conexão ou erro de conversão de dados.")
+    verificar_erro_site(driver, logger, razao_social=razao_social)
 
-def abrir_sefaz_emit(driver, logger):
+def abrir_sefaz_emit(driver, logger, razao_social=None):
     sefaz_remet = os.getenv('SEFAZ_REMET')
     driver.get(sefaz_remet)
-    # Verificar se há erro no site
-    if verificar_erro_site(driver, logger):
-        raise Exception("Erro detectado no site: Falha de conexão ou erro de conversão de dados.")
+    verificar_erro_site(driver, logger, razao_social=razao_social)
     
 def sanitizar_nome(nome):
     """
@@ -152,19 +151,55 @@ def fazer_login(driver, razao_social, wait, logger, login, senha, run_id=None, t
         diag.salvar_evidencia(driver, run_id, razao_social, tipo, "login", sufixo="exception")
         raise
 
-def verificar_erro_site(driver, logger):
-    """
-    Função para verificar se há erros conhecidos no site, buscando o termo 'OPS'.
+# Heurística de IP block: o SEFAZ-BA não expõe um marcador único quando bloqueia
+# o IP — varia entre "muitas tentativas", "acesso negado", "403", etc. Lista
+# conservadora; só dispara quando ≥2 sinais batem no texto da página (reduz
+# falso positivo do "OPS!" genérico, que cai como PORTAL_DOWN).
+_IP_BLOCK_SIGNAIS = (
+    "bloqueado",
+    "ip bloqueado",
+    "muitas tentativas",
+    "tentativas excedidas",
+    "acesso negado",
+    "403",
+    "forbidden",
+)
+
+
+def _detectar_ip_block(body_text: str) -> bool:
+    if not body_text:
+        return False
+    lower = body_text.lower()
+    hits = sum(1 for s in _IP_BLOCK_SIGNAIS if s in lower)
+    return hits >= 2
+
+
+def verificar_erro_site(driver, logger, razao_social=None):
+    """Inspeciona o body do portal e levanta exceção tipada quando reconhece erro.
+
+    - 2+ sinais de IP block (palavras-chave heurísticas) → IpBlockedError.
+    - 'OPS!' (mensagem padrão de falha do SEFAZ-BA) → PortalDownError.
+    - Body ausente / sem padrão conhecido → return None (caller segue).
     """
     try:
-        # Verificar se o termo "OPS" aparece na página
-        mensagem_erro = driver.find_element(By.TAG_NAME, 'body').text
-        if "OPS!" in mensagem_erro:
-            logger.error(f"Erro detectado no site: {mensagem_erro}")
-            return True
-        return False
+        body = driver.find_element(By.TAG_NAME, 'body').text
     except NoSuchElementException:
-        return False
+        return
+
+    if _detectar_ip_block(body):
+        logger.error(f"IP block detectado no portal SEFAZ-BA (razao_social={razao_social})")
+        raise IpBlockedError(
+            f"IP possivelmente bloqueado pelo SEFAZ-BA (heurística de página) "
+            f"— empresa {razao_social}",
+            empresa=razao_social,
+        )
+
+    if "OPS!" in body:
+        logger.error(f"Portal SEFAZ-BA retornou 'OPS!' (razao_social={razao_social})")
+        raise PortalDownError(
+            f"Portal SEFAZ-BA fora do ar (mensagem 'OPS!') — empresa {razao_social}",
+            empresa=razao_social,
+        )
 
 def preencher_formulario(driver, wait, logger, data_inicio, data_fim, pasta_mes_ano, tipo,
                          razao_social=None, run_id=None):
@@ -293,7 +328,10 @@ def baixar_planilha(driver, wait, logger, razao_social, tipo, download_dir, data
                 diag.salvar_evidencia(driver, run_id, razao_social, tipo,
                                       "aguardar_download", sufixo="timeout")
                 logger.error("Tempo de espera para download excedido")
-                raise TimeoutException("Tempo de espera para download excedido")
+                raise JobTimeoutError(
+                    f"Timeout de download para {razao_social} (tipo {tipo}, limite {timeout}s)",
+                    empresa=razao_social,
+                )
 
             arquivos_baixados = os.listdir(download_dir)
             crdownloads = [a for a in arquivos_baixados if a.endswith('.crdownload')]
@@ -344,6 +382,8 @@ def baixar_planilha(driver, wait, logger, razao_social, tipo, download_dir, data
 
             time.sleep(1)
 
+    except BotPlanilhaError:
+        raise
     except TimeoutException:
         logger.error("Erro ao baixar a planilha: tempo de espera excedido")
         raise
@@ -502,10 +542,10 @@ def download(logger, row, razao_social, login, senha, data_inicio, data_fim, dir
              driver_instance = driver
 
         if tipo == "destinatario":
-            abrir_sefaz_dest(driver_instance, logger)
+            abrir_sefaz_dest(driver_instance, logger, razao_social=razao_social_sanitizada)
             tipo_consulta = "DESTINATÁRIO"
         elif tipo == "remetente":
-            abrir_sefaz_emit(driver_instance, logger)
+            abrir_sefaz_emit(driver_instance, logger, razao_social=razao_social_sanitizada)
             tipo_consulta = "REMETENTE"
         else:
             logger.error(f"Tipo de consulta inválido: {tipo}")

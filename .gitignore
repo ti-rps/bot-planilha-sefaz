@@ -14,6 +14,10 @@ downloads/
 temp_captcha/
 webdriver/
 
+# Virtualenv local (dev)
+.venv/
+venv/
+
 # Backups
 *.bak
 

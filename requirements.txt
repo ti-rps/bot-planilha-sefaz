@@ -14,6 +14,12 @@ webdriver-manager # <-- ADICIONE ESTA LINHA
 # Environment variable management
 python-dotenv
 
+# HTTP client (Maestro worker API + Capsolver fallbacks)
+requests
+
+# RabbitMQ consumer (worker FASE 5)
+pika
+
 # CAPTCHA solving library/service client
 capsolver
 

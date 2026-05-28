@@ -1,0 +1,61 @@
+# Deploy de produção do worker bot-planilha-sefaz no SRVRPS03 (FASE 6).
+#
+# Pré-requisitos no host (ver README §Deploy):
+#   1. Share CIFS \\SRVDOC01\REDE\FISCAL montado em /mnt/fiscal (via /etc/fstab).
+#   2. credentials/<google-sa>.json presente (gitignored — copiar manualmente).
+#   3. .env preenchido com SEFAZ/Google/Maestro/RabbitMQ (ver .env.example).
+#   4. Migration 000009 (job_logs.actionable) aplicada no DB do Maestro.
+#
+# O RabbitMQ e a API HTTP são do rps-maestro (rodam em outro container/host) —
+# este compose sobe SÓ o worker e conecta no broker existente.
+services:
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: bot-planilha-sefaz:latest
+    container_name: bot-planilha-sefaz-worker
+    restart: unless-stopped
+
+    # Segredos e config de negócio vêm do .env (fora do git).
+    env_file:
+      - .env
+
+    # Overrides específicos do container. Têm precedência sobre o .env.
+    environment:
+      HEADLESS: "true"
+      CHROME_BINARY: /usr/bin/chromium
+      CHROMEDRIVER_PATH: /usr/bin/chromedriver
+      # /share = mountpoint do \\SRVDOC01\REDE\FISCAL (ver volume abaixo).
+      DESTINO_BASE: /share/00 PLANILHA SEFAZ
+      GOOGLE_CREDENTIALS_FILE: /run/credentials/google-sa.json
+      # Conexão com o rps-maestro. Defaults assumem o broker/API no próprio host.
+      MAESTRO_API_URL: ${MAESTRO_API_URL:-http://host.docker.internal:8080}
+      MAESTRO_RABBITMQ_HOST: ${MAESTRO_RABBITMQ_HOST:-host.docker.internal}
+      MAESTRO_RABBITMQ_PORT: ${MAESTRO_RABBITMQ_PORT:-5672}
+      MAESTRO_RABBITMQ_QUEUE: ${MAESTRO_RABBITMQ_QUEUE:-bot-planilha-tasks}
+
+    volumes:
+      # Share de destino das planilhas (read-write — o worker escreve os CSVs).
+      - /mnt/fiscal:/share
+      # Credencial do Service Account, montada read-only (não vai pra imagem).
+      - ./credentials/citric-nimbus-436114-g8-daacef9f0900.json:/run/credentials/google-sa.json:ro
+      # Logs persistidos no host pra inspeção pós-mortem.
+      - ./log:/app/log
+
+    # Chrome usa /dev/shm; mesmo com --disable-dev-shm-usage, 1g evita crashes
+    # esporádicos de aba em páginas pesadas.
+    shm_size: "1gb"
+
+    security_opt:
+      - no-new-privileges:true
+
+    # host.docker.internal resolve o host de dentro do container (Linux).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
