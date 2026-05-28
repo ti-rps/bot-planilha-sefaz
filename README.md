@@ -15,6 +15,9 @@ CNPJ, flag contribuinte). O CAPTCHA é resolvido via Capsolver.
 ## Deploy em produção (Docker — SRVRPS03)
 
 O worker roda em container conectado ao RabbitMQ/API do rps-maestro.
+Para o playbook completo de cutover (pré-flight, `parameterSchema` do
+Maestro, smoke job, período paralelo, rollback, deprecação da Tkinter)
+ver [CUTOVER.md](CUTOVER.md).
 
 ### Pré-requisitos no host
 
