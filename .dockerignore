@@ -10,6 +10,12 @@ downloads/
 temp_captcha/
 webdriver/
 
+# Dev-only: venv local e testes não vão pra imagem
+.venv/
+venv/
+tests/
+pytest.ini
+
 # Python
 __pycache__/
 *.pyc
