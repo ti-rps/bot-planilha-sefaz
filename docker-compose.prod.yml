@@ -37,7 +37,13 @@ services:
 
     volumes:
       # Share de destino das planilhas (read-write — o worker escreve os CSVs).
-      - /mnt/fiscal:/share
+      # SHARE_HOST_PATH é o mountpoint do share no HOST. Default cobre o cenário
+      # "Linux nativo + CIFS in-kernel em /mnt/fiscal" da decisão #11. No SRVRPS03
+      # o host é Windows com WSL2 + Docker; o share \\SRVDOC01\REDE entra via
+      # drvfs em /mnt/r (mapeado no Windows como R:), e o .env aponta para
+      # SHARE_HOST_PATH=/mnt/r/FISCAL — o motivo é bug conhecido do CIFS
+      # in-kernel no WSL2 6.x (UPCALL/SPNEGO ENOKEY).
+      - ${SHARE_HOST_PATH:-/mnt/fiscal}:/share
       # Credencial do Service Account, montada read-only (não vai pra imagem).
       - ./credentials/citric-nimbus-436114-g8-daacef9f0900.json:/run/credentials/google-sa.json:ro
       # Logs persistidos no host pra inspeção pós-mortem.
