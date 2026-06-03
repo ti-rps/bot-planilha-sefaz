@@ -61,17 +61,28 @@ def get_empresa(logger, row):
     empresa = row['RAZÃO SOCIAL']
     return empresa
 
+def _mascarar(valor):
+    """Mascara credencial para log: mostra só os últimos 2 chars.
+
+    Evita vazar login/senha em texto claro no stdout/logs do Docker (e em
+    qualquer agregador). Mantém um sufixo curto para rastreio/debug.
+    """
+    s = "" if valor is None else str(valor)
+    if len(s) <= 2:
+        return "****"
+    return "****" + s[-2:]
+
 def get_login(logger, row):
-    logger.info(f"Login: {row['Login']}")
     login = row['Login']
+    logger.info(f"Login: {_mascarar(login)}")
     return login
 
 def get_senha(logger, row):
-    logger.info(f"Senha: {row['Senha Robô']}")
     senha = row['Senha Robô']
+    logger.info("Senha: ****")
     return senha
 
 def get_isContribuinte(logger, row):
-    logger.info(f"Senha: {row['Contribuinte']}")
+    logger.info(f"Contribuinte: {row['Contribuinte']}")
     isContribuinte = row['Senha Robô']
     return isContribuinte

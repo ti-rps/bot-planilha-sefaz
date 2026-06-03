@@ -19,6 +19,14 @@ services:
     container_name: bot-planilha-sefaz-worker
     restart: unless-stopped
 
+    # Janela para o encerramento gracioso. Em `docker stop`/restart o worker
+    # recebe SIGTERM e transforma em cancelamento cooperativo: cancela as
+    # empresas pending, aguarda as in-flight (Selenium/CAPTCHA, 1-3 min cada),
+    # reporta `canceled` ao Maestro e dá ack ANTES de sair. O default de 10s
+    # vira SIGKILL no meio do job (job preso 'running' + reentrega). 120s cobre
+    # o pior caso de até max_workers empresas in-flight.
+    stop_grace_period: 120s
+
     # Segredos e config de negócio vêm do .env (fora do git).
     env_file:
       - .env

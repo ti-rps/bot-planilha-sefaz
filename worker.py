@@ -115,6 +115,10 @@ class RabbitMQWorker:
         self.connection: Optional[pika.BlockingConnection] = None
         self.channel = None
         self.should_stop = False
+        # cancel_event do job em andamento (None quando ocioso). O handler de
+        # sinal seta esse event para fazer SIGTERM/SIGINT virarem cancelamento
+        # cooperativo em vez de hard-kill no meio do job.
+        self._active_cancel_event: Optional[threading.Event] = None
 
         # DataFrame da Sheet carregado uma vez no boot. Cada job-loop relê via
         # _ensure_df pra pegar mudanças entre jobs (operador edita Sheet a
@@ -127,14 +131,50 @@ class RabbitMQWorker:
         signal.signal(signal.SIGTERM, self._signal_handler)
 
     def _signal_handler(self, signum, frame):
-        self.logger.info(f"Recebido sinal {signum}. Encerrando...")
+        # Segundo sinal = saída forçada (escape hatch se o gracioso travar).
+        if self.should_stop:
+            self.logger.warning(f"Segundo sinal {signum} recebido — forçando saída.")
+            sys.exit(1)
+
         self.should_stop = True
-        if self.connection and not self.connection.is_closed:
-            try:
-                self.connection.close()
-            except Exception:
-                pass
-        sys.exit(0)
+        cancel_event = self._active_cancel_event
+        if cancel_event is not None:
+            # Há job em andamento: vira cancelamento cooperativo. O run_batch
+            # cancela as pending, aguarda as in-flight, devolve status=canceled,
+            # e process_message reporta canceled + ack ANTES de sair. Sem isso,
+            # o job ficava preso 'running' no Maestro e a mensagem era reentregue.
+            self.logger.info(
+                f"Recebido sinal {signum}. Cancelando job em andamento "
+                f"(graceful) — aguardando empresa(s) in-flight terminarem..."
+            )
+            cancel_event.set()
+        else:
+            # Ocioso: nada rodando. Acorda o IO loop pra parar de consumir e sair.
+            self.logger.info(f"Recebido sinal {signum}. Encerrando (worker ocioso)...")
+            self._request_stop_consuming()
+
+    def _request_stop_consuming(self) -> None:
+        """Pede ao loop do pika para parar de consumir, de forma thread-safe.
+
+        Chamado tanto do handler de sinal (worker ocioso) quanto do fim do
+        process_message (quando should_stop foi setado durante um job). Usa
+        add_callback_threadsafe porque mexer no canal direto de outro contexto
+        não é seguro com a BlockingConnection.
+        """
+        conn = self.connection
+        if conn is None or conn.is_closed:
+            return
+        try:
+            conn.add_callback_threadsafe(self._stop_consuming)
+        except Exception as e:
+            self.logger.warning(f"Falha ao agendar stop_consuming: {e}")
+
+    def _stop_consuming(self) -> None:
+        try:
+            if self.channel is not None and self.channel.is_open:
+                self.channel.stop_consuming()
+        except Exception as e:
+            self.logger.warning(f"Falha em stop_consuming: {e}")
 
     def _ensure_df(self):
         """Lazy-load do DataFrame da Sheet com TTL. Reusa entre jobs próximos."""
@@ -409,11 +449,17 @@ class RabbitMQWorker:
                 poll_interval=_CANCELLATION_POLL_INTERVAL,
                 on_cancel=_on_cancel,
             ) as watcher:
-                summary, status, error_class, partial_success = self._run_batch_with_heartbeat(
-                    empresas, data_inicial, data_fim,
-                    destinatario, remetente, df, run_id,
-                    on_log=_on_log, cancel_event=watcher.cancel_event,
-                )
+                # Expõe o cancel_event ao handler de sinal: SIGTERM/SIGINT
+                # durante o job viram cancelamento cooperativo.
+                self._active_cancel_event = watcher.cancel_event
+                try:
+                    summary, status, error_class, partial_success = self._run_batch_with_heartbeat(
+                        empresas, data_inicial, data_fim,
+                        destinatario, remetente, df, run_id,
+                        on_log=_on_log, cancel_event=watcher.cancel_event,
+                    )
+                finally:
+                    self._active_cancel_event = None
 
             completed_at = datetime.now(timezone.utc)
 
@@ -496,6 +542,13 @@ class RabbitMQWorker:
             else:
                 self.logger.error("Falha permanente — mensagem descartada.")
             self._safe_ack(ch, method, requeue=is_transient)
+
+        finally:
+            # Se um SIGTERM/SIGINT chegou durante o job, já reportamos o status
+            # terminal e ackamos acima; agora paramos o consumo para sair limpo
+            # (sem deixar a mensagem unacked → sem reprocesso na próxima subida).
+            if self.should_stop:
+                self._request_stop_consuming()
 
     def start(self):
         self.logger.info("=" * 60)

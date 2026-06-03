@@ -298,6 +298,23 @@ def preencher_formulario(driver, wait, logger, data_inicio, data_fim, pasta_mes_
         diag.salvar_evidencia(driver, run_id, razao_social, tipo, "preencher_formulario", sufixo="exception")
         raise
 
+def _download_em_progresso(nome: str) -> bool:
+    """True se `nome` é um arquivo temporário de download ainda em escrita.
+
+    Cobre tanto o `.crdownload` (Chrome/Windows) quanto os temporários que o
+    Chromium do Linux cria durante a escrita (`.com.google.Chrome.XXXX`,
+    `.org.chromium.Chromium.XXXX`) e qualquer dotfile parcial. Sem isso, o
+    temporário do Chromium era classificado como "finalizado", renomeado e
+    sumia no meio do `os.rename` → FileNotFoundError (ver incidente 03/06).
+    """
+    return (
+        nome.endswith((".crdownload", ".tmp", ".part"))
+        or nome.startswith(".com.google.Chrome.")
+        or nome.startswith(".org.chromium.Chromium.")
+        or nome.startswith(".")
+    )
+
+
 def baixar_planilha(driver, wait, logger, razao_social, tipo, download_dir, data_inicio,
                     run_id=None):
     try:
@@ -334,23 +351,26 @@ def baixar_planilha(driver, wait, logger, razao_social, tipo, download_dir, data
                 )
 
             arquivos_baixados = os.listdir(download_dir)
-            crdownloads = [a for a in arquivos_baixados if a.endswith('.crdownload')]
-            finalizados = [a for a in arquivos_baixados if not a.endswith('.crdownload')]
+            em_progresso = [a for a in arquivos_baixados if _download_em_progresso(a)]
+            # Só conta como finalizado o CSV real — nunca um temporário do
+            # navegador (que não termina em .crdownload mas também não acabou).
+            finalizados = [a for a in arquivos_baixados
+                           if not _download_em_progresso(a) and a.lower().endswith('.csv')]
 
-            if crdownloads and not viu_crdownload:
+            if em_progresso and not viu_crdownload:
                 viu_crdownload = True
                 diag.evento(run_id, razao_social, tipo, "aguardar_download", "iniciado",
-                            extras={"crdownloads": crdownloads,
+                            extras={"em_progresso": em_progresso,
                                     "decorrido_s": round(decorrido, 1)})
 
             # Snapshot a cada ~5s para enxergar progresso
-            chave_snapshot = (tuple(sorted(crdownloads)), tuple(sorted(finalizados)))
+            chave_snapshot = (tuple(sorted(em_progresso)), tuple(sorted(finalizados)))
             if chave_snapshot != ultimo_snapshot and (int(decorrido) % 5 == 0):
                 ultimo_snapshot = chave_snapshot
 
-            # Só considera download concluído quando NÃO há .crdownload pendente
-            # e existe pelo menos um arquivo finalizado.
-            if finalizados and not crdownloads:
+            # Só considera download concluído quando NÃO há temporário pendente
+            # e já existe o CSV finalizado.
+            if finalizados and not em_progresso:
                 arquivo_baixado = os.path.join(download_dir, finalizados[0])
 
                 if not verificar_arquivo_em_uso(arquivo_baixado):
