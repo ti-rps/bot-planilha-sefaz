@@ -1,7 +1,9 @@
 # Deploy de produção do worker bot-planilha-sefaz no SRVRPS03 (FASE 6).
 #
 # Pré-requisitos no host (ver README §Deploy):
-#   1. Share CIFS \\SRVDOC01\REDE\FISCAL montado em /mnt/fiscal (via /etc/fstab).
+#   1. Share \\SRVDOC01\REDE\FISCAL acessível no host e exposto via SHARE_HOST_PATH
+#      (ver bloco env abaixo). No SRVRPS03 = Windows+WSL2/drvfs em /mnt/r/FISCAL;
+#      em Linux nativo = CIFS in-kernel em /mnt/fiscal (default).
 #   2. credentials/<google-sa>.json presente (gitignored — copiar manualmente).
 #   3. .env preenchido com SEFAZ/Google/Maestro/RabbitMQ (ver .env.example).
 #   4. Migration 000009 (job_logs.actionable) aplicada no DB do Maestro.
@@ -37,7 +39,13 @@ services:
 
     volumes:
       # Share de destino das planilhas (read-write — o worker escreve os CSVs).
-      - /mnt/fiscal:/share
+      # SHARE_HOST_PATH é o mountpoint do share no HOST. Default cobre o cenário
+      # "Linux nativo + CIFS in-kernel em /mnt/fiscal" da decisão #11. No SRVRPS03
+      # o host é Windows com WSL2 + Docker; o share \\SRVDOC01\REDE entra via
+      # drvfs em /mnt/r (mapeado no Windows como R:), e o .env aponta para
+      # SHARE_HOST_PATH=/mnt/r/FISCAL — o motivo é bug conhecido do CIFS
+      # in-kernel no WSL2 6.x (UPCALL/SPNEGO ENOKEY).
+      - ${SHARE_HOST_PATH:-/mnt/fiscal}:/share
       # Credencial do Service Account, montada read-only (não vai pra imagem).
       - ./credentials/citric-nimbus-436114-g8-daacef9f0900.json:/run/credentials/google-sa.json:ro
       # Logs persistidos no host pra inspeção pós-mortem.
