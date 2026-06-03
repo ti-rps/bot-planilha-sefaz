@@ -1,7 +1,9 @@
 # Deploy de produção do worker bot-planilha-sefaz no SRVRPS03 (FASE 6).
 #
 # Pré-requisitos no host (ver README §Deploy):
-#   1. Share CIFS \\SRVDOC01\REDE\FISCAL montado em /mnt/fiscal (via /etc/fstab).
+#   1. Share \\SRVDOC01\REDE\FISCAL acessível no host e exposto via SHARE_HOST_PATH
+#      (ver bloco env abaixo). No SRVRPS03 = Windows+WSL2/drvfs em /mnt/r/FISCAL;
+#      em Linux nativo = CIFS in-kernel em /mnt/fiscal (default).
 #   2. credentials/<google-sa>.json presente (gitignored — copiar manualmente).
 #   3. .env preenchido com SEFAZ/Google/Maestro/RabbitMQ (ver .env.example).
 #   4. Migration 000009 (job_logs.actionable) aplicada no DB do Maestro.
