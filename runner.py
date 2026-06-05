@@ -28,10 +28,14 @@ from typing import Callable, Optional
 import baixar_planilha_sefaz as bs
 import ler_planilha as lp
 import retry_policy
-from errors import BotPlanilhaError, InvalidParametersError
+from errors import BotPlanilhaError, InvalidParametersError, OperationCanceled
 
 
 OnLog = Callable[[str, str, bool], None]
+
+# Passe de retry no fim do lote (2026-06-05): além da 1ª tentativa, reexecuta
+# as falhas transitórias mais N vezes. Total de tentativas = 1 + RETRY_PASSES.
+_RETRY_PASSES = max(0, int(os.getenv("RETRY_PASSES", "2")))
 
 
 _SISTEMICAS_INFRA = {"IP_BLOCKED", "PORTAL_DOWN", "INFRA_DESTINO_INDISPONIVEL", "RATE_LIMITED"}
@@ -42,7 +46,8 @@ _SISTEMICAS_INFRA = {"IP_BLOCKED", "PORTAL_DOWN", "INFRA_DESTINO_INDISPONIVEL", 
 _IP_BLOCK_CIRCUIT_THRESHOLD = 3
 
 
-def _resultado_empresa(razao_social, *, status, error_class=None, error_type=None, message=None, actionable=False):
+def _resultado_empresa(razao_social, *, status, error_class=None, error_type=None,
+                       message=None, actionable=False, login=None, timestamp=None):
     return {
         "empresa": razao_social,
         "status": status,
@@ -50,10 +55,13 @@ def _resultado_empresa(razao_social, *, status, error_class=None, error_type=Non
         "error_type": error_type,
         "message": message,
         "actionable": actionable,
+        # Detalhes extras p/ o relatório de credenciais por e-mail (item 5).
+        "login": login,
+        "timestamp": timestamp,
     }
 
 
-def processar_empresa(row_data, data_inicial, data_final, destinatario, remetente, dir_temp, driver, wait, logger, run_id=None):
+def processar_empresa(row_data, data_inicial, data_final, destinatario, remetente, dir_temp, driver, wait, logger, run_id=None, cancel_event=None):
     login_val = lp.get_login(logger, row_data)
     senha_val = lp.get_senha(logger, row_data)
     razao_social = lp.get_empresa(logger, row_data)
@@ -82,21 +90,24 @@ def processar_empresa(row_data, data_inicial, data_final, destinatario, remetent
     resultados = []
     if destinatario:
         logger.info(f"Baixando como Destinatário para a empresa {razao_social}")
-        resultados.append(bs.download(logger, row_data, razao_social, login_str, senha_str, data_inicial, data_final, dir_temp, tipo="destinatario", driver=driver, wait=wait, run_id=run_id))
+        resultados.append(bs.download(logger, row_data, razao_social, login_str, senha_str, data_inicial, data_final, dir_temp, tipo="destinatario", driver=driver, wait=wait, run_id=run_id, cancel_event=cancel_event))
     if remetente:
         logger.info(f"Baixando como Remetente para a empresa {razao_social}")
-        resultados.append(bs.download(logger, row_data, razao_social, login_str, senha_str, data_inicial, data_final, dir_temp, tipo="remetente", driver=driver, wait=wait, run_id=run_id))
+        resultados.append(bs.download(logger, row_data, razao_social, login_str, senha_str, data_inicial, data_final, dir_temp, tipo="remetente", driver=driver, wait=wait, run_id=run_id, cancel_event=cancel_event))
 
     return "ok" if "ok" in resultados else "no_data"
 
 
 def _executar_empresa_uma_vez(empresa_data_series, razao_social, data_inicial, data_final,
-                              destinatario, remetente, run_id, logger):
+                              destinatario, remetente, run_id, logger, cancel_event=None):
     """Uma tentativa singular: cria driver, baixa, fecha driver. Sem retry.
 
-    Retorna o dict canônico de `_resultado_empresa`. Usado pelo envelope de
-    retry abaixo — não chamar direto fora do runner.
+    Retorna o dict canônico de `_resultado_empresa`. As passes de retry vivem
+    em `run_batch` — não chamar direto fora do runner.
     """
+    login_mascarado = lp._mascarar(empresa_data_series.get("Login")) if hasattr(empresa_data_series, "get") else None
+    agora = datetime.now(timezone.utc).isoformat()
+
     dir_temp = str(uuid.uuid4())
     download_dir_thread = os.path.join("downloads", dir_temp)
     os.makedirs(download_dir_thread, exist_ok=True)
@@ -108,22 +119,31 @@ def _executar_empresa_uma_vez(empresa_data_series, razao_social, data_inicial, d
             empresa_data_series, data_inicial, data_final,
             destinatario, remetente,
             dir_temp, driver_instance, wait_instance, logger, run_id=run_id,
+            cancel_event=cancel_event,
         )
         return _resultado_empresa(razao_social, status=empresa_status)
+    except OperationCanceled:
+        # Cancelamento cooperativo no meio da empresa: não é falha.
+        logger.info(f"{razao_social}: cancelado em andamento.")
+        return _resultado_empresa(razao_social, status="canceled")
     except BotPlanilhaError as e:
         logger.error(f"[{e.error_class}] {razao_social}: {e.message}")
         return _resultado_empresa(razao_social, status="failed",
                                   error_class=e.error_class,
                                   error_type=type(e).__name__,
                                   message=e.message,
-                                  actionable=e.actionable)
+                                  actionable=e.actionable,
+                                  login=login_mascarado,
+                                  timestamp=agora)
     except Exception as e:
         logger.exception(f"Erro inesperado ao processar {razao_social} na thread")
         return _resultado_empresa(razao_social, status="failed",
                                   error_class="UNKNOWN",
                                   error_type=type(e).__name__,
                                   message=str(e),
-                                  actionable=False)
+                                  actionable=False,
+                                  login=login_mascarado,
+                                  timestamp=agora)
     finally:
         if driver_instance:
             try:
@@ -137,15 +157,12 @@ def processar_empresa_thread(empresa_values, data_inicial, data_final,
                              destinatario_selecionado, remetente_selecionado,
                              df, logger, run_id=None,
                              cancel_event: Optional[threading.Event] = None):
-    """Envelope com retry por error_class (FASE 2).
+    """Uma tentativa de uma empresa (resolve a linha na Sheet + executa).
 
-    Validações de input (df/empresa na Sheet) ficam fora do retry — falham
-    direto com INVALID_PARAMETERS actionable. Só a execução real (driver +
-    download) entra no loop.
-
-    Política de retry vive em `retry_policy.py`. Entre tentativas usa
-    `cancel_event.wait(backoff)` se o batch passou um event — assim um
-    cancel pelo Maestro interrompe o backoff em vez de esperar todo ele.
+    O retry NÃO vive mais aqui (era inline por error_class, FASE 2). Agora é uma
+    PASSE DIFERIDA no fim do lote, orquestrada por `run_batch`: roda tudo, depois
+    reexecuta as falhas transitórias mais N vezes. Aqui ficou só a validação de
+    input (INVALID_PARAMETERS actionable, fora de qualquer retry) + 1 execução.
     """
     razao_social = empresa_values[1]
 
@@ -168,41 +185,11 @@ def processar_empresa_thread(empresa_values, data_inicial, data_final,
 
     empresa_data_series = empresa_df_row_results.iloc[0]
 
-    attempt = 1
-    resultado = _executar_empresa_uma_vez(
+    return _executar_empresa_uma_vez(
         empresa_data_series, razao_social, data_inicial, data_final,
         destinatario_selecionado, remetente_selecionado, run_id, logger,
+        cancel_event=cancel_event,
     )
-
-    while resultado["status"] == "failed" and retry_policy.is_retryable(resultado["error_class"]):
-        ec = resultado["error_class"]
-        total = retry_policy.max_attempts(ec)
-        if attempt >= total:
-            logger.warning(
-                f"Empresa {razao_social}: esgotou {total} tentativa(s) com error_class={ec}. "
-                f"Devolvendo falha."
-            )
-            break
-
-        wait = retry_policy.backoff_seconds(ec, attempt + 1)
-        logger.info(
-            f"Empresa {razao_social}: retry {attempt + 1}/{total} em {wait:.1f}s "
-            f"(falha anterior: {ec})"
-        )
-        if cancel_event is not None:
-            if cancel_event.wait(timeout=wait):
-                logger.info(f"Empresa {razao_social}: cancel acionado durante backoff — abortando retry.")
-                return resultado
-        else:
-            time.sleep(wait)
-
-        attempt += 1
-        resultado = _executar_empresa_uma_vez(
-            empresa_data_series, razao_social, data_inicial, data_final,
-            destinatario_selecionado, remetente_selecionado, run_id, logger,
-        )
-
-    return resultado
 
 
 def classificar_run(summary, *, canceled: bool = False):
@@ -283,6 +270,118 @@ def _safe_on_log(on_log: Optional[OnLog], level: str, message: str, actionable: 
         logger.warning(f"on_log levantou exceção (ignorando): {cb_err}")
 
 
+def _executar_pool(empresas_list, data_inicial, data_final, destinatario, remetente,
+                   df, logger, *, max_workers, run_id, on_log, cancel_event,
+                   progress_callback):
+    """Roda UM pool de threads sobre `empresas_list`.
+
+    Devolve (resultados, skipped, canceled, ip_circuit_aberto):
+      - resultados: dict razao -> dict canônico (ok/no_data/failed/canceled);
+      - skipped: list de razões cujas futures foram canceladas (cancel/circuit);
+      - canceled: bool — cancel_event acionado durante este pool;
+      - ip_circuit_aberto: bool — circuit breaker IP_BLOCKED abriu neste pool.
+
+    A orquestração de passes (run_batch) é quem agrega isso entre tentativas.
+    """
+    resultados = {}
+    skipped = []
+    canceled = False
+    ip_block_consecutivos = 0
+    ip_circuit_aberto = False
+    total = len(empresas_list)
+    processed = 0
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_razao = {
+            executor.submit(
+                processar_empresa_thread, ev, data_inicial, data_final,
+                destinatario, remetente, df, logger, run_id, cancel_event,
+            ): ev[1]
+            for ev in empresas_list
+        }
+
+        for future in concurrent.futures.as_completed(future_to_razao):
+            razao_social_key = future_to_razao[future]
+            resultado_status = None
+            resultado_ec = None
+            try:
+                resultado = future.result()
+                resultado_status = resultado["status"]
+                resultado_ec = resultado["error_class"]
+                resultados[razao_social_key] = resultado
+                if resultado_status == "ok":
+                    logger.info(f"Empresa {razao_social_key} processada com sucesso.")
+                    _safe_on_log(on_log, "INFO", f"OK: {razao_social_key}", False, logger)
+                elif resultado_status == "no_data":
+                    logger.info(f"Empresa {razao_social_key} concluída sem dados.")
+                    _safe_on_log(on_log, "INFO", f"Sem dados: {razao_social_key}", False, logger)
+                elif resultado_status == "canceled":
+                    logger.info(f"Empresa {razao_social_key} cancelada em andamento.")
+                else:
+                    logger.error(f"[{resultado_ec}] {razao_social_key}: {resultado['message']}")
+                    _safe_on_log(
+                        on_log, "ERROR",
+                        f"[{resultado_ec}] {razao_social_key}: {resultado['message']}",
+                        bool(resultado.get("actionable", False)), logger,
+                    )
+            except concurrent.futures.CancelledError:
+                # Future cancelada pelo cancel_event OU pelo circuit breaker.
+                skipped.append(razao_social_key)
+                logger.info(f"Empresa {razao_social_key} pulada (cancel ou circuit).")
+                continue
+            except Exception as exc_f:
+                logger.error(f"Exceção ao obter resultado da future para {razao_social_key}: {exc_f}", exc_info=True)
+                resultados[razao_social_key] = _resultado_empresa(
+                    razao_social_key, status="failed", error_class="UNKNOWN",
+                    error_type=type(exc_f).__name__, message=str(exc_f),
+                )
+                _safe_on_log(on_log, "ERROR", f"[UNKNOWN] {razao_social_key}: {exc_f}", False, logger)
+                resultado_ec = "UNKNOWN"
+                resultado_status = "failed"
+
+            processed += 1
+            if progress_callback:
+                try:
+                    progress_callback(processed, total)
+                except Exception as cb_err:
+                    logger.warning(f"progress_callback levantou exceção (ignorando): {cb_err}")
+
+            # Circuit breaker IP_BLOCKED: N falhas IP_BLOCKED consecutivas (em
+            # ordem de as_completed) pulam o resto do pool. Reset em qualquer
+            # outro outcome.
+            if resultado_status == "failed" and resultado_ec == "IP_BLOCKED":
+                ip_block_consecutivos += 1
+            else:
+                ip_block_consecutivos = 0
+
+            if not ip_circuit_aberto and ip_block_consecutivos >= _IP_BLOCK_CIRCUIT_THRESHOLD:
+                ip_circuit_aberto = True
+                pending = [f for f in future_to_razao if not f.done()]
+                n_cancelled = sum(1 for f in pending if f.cancel())
+                msg = (
+                    f"Circuit breaker IP_BLOCKED aberto após {ip_block_consecutivos} "
+                    f"falhas consecutivas. {n_cancelled} empresa(s) restantes puladas."
+                )
+                logger.warning(msg)
+                _safe_on_log(on_log, "WARNING", msg, True, logger)
+
+            if cancel_event is not None and cancel_event.is_set() and not canceled:
+                canceled = True
+                pending = [f for f in future_to_razao if not f.done()]
+                cancelled_count = sum(1 for f in pending if f.cancel())
+                logger.warning(
+                    f"Cancelamento solicitado: {cancelled_count}/{len(pending)} futures pending canceladas; "
+                    f"aguardando in-flight terminar."
+                )
+                _safe_on_log(
+                    on_log, "WARNING",
+                    "Cancelamento solicitado. Aguardando empresa(s) em andamento.",
+                    False, logger,
+                )
+
+    return resultados, skipped, canceled, ip_circuit_aberto
+
+
 def run_batch(
     empresas_list,
     data_inicial,
@@ -334,112 +433,81 @@ def run_batch(
     if run_id is None:
         run_id = diag.gerar_run_id()
 
-    summary = {"ok": [], "failed": [], "no_data": [], "skipped": []}
     total = len(empresas_list)
-    processed = 0
+    _safe_on_log(on_log, "INFO", f"Processando {total} empresa(s) | workers={max_workers}", False, logger)
+
+    # final: razao -> resultado da ÚLTIMA passe que tocou a empresa.
+    final: dict = {}
+    skipped_all: list = []
     canceled = False
-    ip_block_consecutivos = 0
     ip_block_circuit_open = False
+    by_razao = {ev[1]: ev for ev in empresas_list}
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_razao = {
-            executor.submit(
-                processar_empresa_thread, ev, data_inicial, data_final,
-                destinatario, remetente, df, logger, run_id,
-                cancel_event,
-            ): ev[1]
-            for ev in empresas_list
-        }
+    total_passes = 1 + _RETRY_PASSES
+    lista_atual = list(empresas_list)
 
-        _safe_on_log(on_log, "INFO", f"Processando {total} empresa(s) | workers={max_workers}", False, logger)
+    for passe in range(total_passes):
+        if not lista_atual:
+            break
+        if passe > 0:
+            msg = (f"Passe de retry {passe}/{_RETRY_PASSES}: reprocessando "
+                   f"{len(lista_atual)} empresa(s) com falha transitória.")
+            logger.info(msg)
+            _safe_on_log(on_log, "INFO", msg, False, logger)
 
-        for future in concurrent.futures.as_completed(future_to_razao):
-            razao_social_key = future_to_razao[future]
-            resultado_status = None
-            resultado_ec = None
-            try:
-                resultado = future.result()
-                resultado_status = resultado["status"]
-                resultado_ec = resultado["error_class"]
-                if resultado_status == "ok":
-                    summary["ok"].append(resultado["empresa"])
-                    logger.info(f"Empresa {razao_social_key} processada com sucesso.")
-                    _safe_on_log(on_log, "INFO", f"OK: {razao_social_key}", False, logger)
-                elif resultado_status == "no_data":
-                    summary["no_data"].append(resultado["empresa"])
-                    logger.info(f"Empresa {razao_social_key} concluída sem dados.")
-                    _safe_on_log(on_log, "INFO", f"Sem dados: {razao_social_key}", False, logger)
-                else:
-                    summary["failed"].append({
-                        "empresa": resultado["empresa"],
-                        "error_class": resultado_ec,
-                        "error_type": resultado["error_type"],
-                        "message": resultado["message"],
-                    })
-                    logger.error(f"[{resultado_ec}] {razao_social_key}: {resultado['message']}")
-                    _safe_on_log(
-                        on_log, "ERROR",
-                        f"[{resultado_ec}] {razao_social_key}: {resultado['message']}",
-                        bool(resultado.get("actionable", False)), logger,
-                    )
-            except concurrent.futures.CancelledError:
-                # Future foi cancelada pelo cancel_event OU pelo circuit breaker.
-                # Não conta como falha — vai pra skipped pra rastreio.
-                summary["skipped"].append(razao_social_key)
-                logger.info(f"Empresa {razao_social_key} pulada (cancel ou circuit).")
-                continue
-            except Exception as exc_f:
-                logger.error(f"Exceção ao obter resultado da future para {razao_social_key}: {exc_f}", exc_info=True)
-                summary["failed"].append({
-                    "empresa": razao_social_key,
-                    "error_class": "UNKNOWN",
-                    "error_type": type(exc_f).__name__,
-                    "message": str(exc_f),
-                })
-                _safe_on_log(on_log, "ERROR", f"[UNKNOWN] {razao_social_key}: {exc_f}", False, logger)
-                resultado_ec = "UNKNOWN"
-                resultado_status = "failed"
+        resultados, skipped, cancld, ipc = _executar_pool(
+            lista_atual, data_inicial, data_final, destinatario, remetente,
+            df, logger, max_workers=max_workers, run_id=run_id, on_log=on_log,
+            cancel_event=cancel_event,
+            # Só mexe na progress bar na 1ª passe (senão a barra "anda pra trás").
+            progress_callback=(progress_callback if passe == 0 else None),
+        )
 
-            processed += 1
-            if progress_callback:
-                try:
-                    progress_callback(processed, total)
-                except Exception as cb_err:
-                    logger.warning(f"progress_callback levantou exceção (ignorando): {cb_err}")
+        for razao, r in resultados.items():
+            final[razao] = r
+        # Só conta como skipped quem NUNCA completou (1ª passe). Numa passe de
+        # retry, uma future cancelada mantém o "failed" anterior — não viramos
+        # failed em skipped (evita contagem dupla).
+        skipped_all.extend([rz for rz in skipped if rz not in final])
+        if cancld:
+            canceled = True
+        if ipc:
+            ip_block_circuit_open = True
 
-            # Circuit breaker IP_BLOCKED (FASE 2): N falhas IP_BLOCKED consecutivas
-            # abrem o circuito e pulam o resto do batch. "Consecutivas" aqui é em
-            # ordem de as_completed (proxy razoável pra "rajada"). Reset em qualquer
-            # outro outcome (ok / no_data / failed com outra classe).
-            if resultado_status == "failed" and resultado_ec == "IP_BLOCKED":
-                ip_block_consecutivos += 1
-            else:
-                ip_block_consecutivos = 0
+        if canceled or ip_block_circuit_open:
+            break
 
-            if not ip_block_circuit_open and ip_block_consecutivos >= _IP_BLOCK_CIRCUIT_THRESHOLD:
-                ip_block_circuit_open = True
-                pending = [f for f in future_to_razao if not f.done()]
-                n_cancelled = sum(1 for f in pending if f.cancel())
-                msg = (
-                    f"Circuit breaker IP_BLOCKED aberto após {ip_block_consecutivos} "
-                    f"falhas consecutivas. {n_cancelled} empresa(s) restantes puladas."
-                )
-                logger.warning(msg)
-                _safe_on_log(on_log, "WARNING", msg, True, logger)
+        if passe < total_passes - 1:
+            lista_atual = [
+                by_razao[razao] for razao, r in final.items()
+                if r["status"] == "failed"
+                and retry_policy.retentavel_no_lote(r["error_class"])
+                and razao in by_razao
+            ]
+        else:
+            lista_atual = []
 
-            if cancel_event is not None and cancel_event.is_set() and not canceled:
-                canceled = True
-                pending = [f for f in future_to_razao if not f.done()]
-                cancelled_count = sum(1 for f in pending if f.cancel())
-                logger.warning(
-                    f"Cancelamento solicitado: {cancelled_count}/{len(pending)} futures pending canceladas; "
-                    f"aguardando in-flight terminar."
-                )
-                _safe_on_log(
-                    on_log, "WARNING",
-                    "Cancelamento solicitado. Aguardando empresa(s) em andamento.",
-                    False, logger,
-                )
+    # Monta o summary canônico a partir de `final` + skipped.
+    summary = {"ok": [], "failed": [], "no_data": [], "skipped": list(skipped_all)}
+    for razao, r in final.items():
+        st = r["status"]
+        if st == "ok":
+            summary["ok"].append(razao)
+        elif st == "no_data":
+            summary["no_data"].append(razao)
+        elif st == "canceled":
+            # Empresa abortada cooperativamente in-flight: rastreio em skipped.
+            summary["skipped"].append(razao)
+        else:
+            summary["failed"].append({
+                "empresa": r["empresa"],
+                "error_class": r["error_class"],
+                "error_type": r["error_type"],
+                "message": r["message"],
+                "actionable": r.get("actionable", False),
+                "login": r.get("login"),
+                "timestamp": r.get("timestamp"),
+            })
 
     if canceled:
         summary["processed_before_cancel"] = (

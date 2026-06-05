@@ -20,6 +20,7 @@ WORKER_PATH_MODULES = [
     "runner",
     "maestro_client",
     "cancellation_watcher",
+    "email_report",
     "cli",
     "worker",
 ]

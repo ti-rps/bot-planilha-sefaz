@@ -36,3 +36,20 @@ def test_backoff_exponencial():
 def test_backoff_respeita_cap():
     # PORTAL_DOWN: base=10, cap=60. attempt grande satura no cap.
     assert rp.backoff_seconds("PORTAL_DOWN", 10) == 60.0
+
+
+# --- passe de retry no fim do lote (2026-06-05) ---
+
+@pytest.mark.parametrize("ec", ["CREDENTIAL_INVALID", "INVALID_PARAMETERS", "IP_BLOCKED"])
+def test_passe_exclui_credencial_parametros_ip(ec):
+    assert rp.retentavel_no_lote(ec) is False
+
+
+@pytest.mark.parametrize(
+    "ec",
+    ["CAPTCHA_FAILED", "JOB_TIMEOUT", "RATE_LIMITED", "PORTAL_DOWN",
+     "INFRA_DESTINO_INDISPONIVEL", "UNKNOWN", None],
+)
+def test_passe_retenta_o_resto(ec):
+    # Tudo que não é credencial/parâmetros/IP entra na passe — inclusive UNKNOWN.
+    assert rp.retentavel_no_lote(ec) is True

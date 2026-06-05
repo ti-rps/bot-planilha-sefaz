@@ -15,6 +15,21 @@ UNKNOWN quando o runner captura Exception genérica (fallback).
 """
 
 
+class OperationCanceled(Exception):
+    """Cancelamento cooperativo de uma empresa in-flight.
+
+    Levantada quando o `cancel_event` do batch é detectado em um ponto seguro
+    no meio do processamento de uma empresa (antes do login, no loop de CAPTCHA,
+    no loop de espera do download). NÃO herda de BotPlanilhaError de propósito:
+    não é falha — o runner a mapeia para "skipped"/canceled, não para "failed".
+    """
+
+    def __init__(self, message: str = "Operação cancelada", *, empresa: str | None = None):
+        super().__init__(message)
+        self.empresa = empresa
+        self.message = message
+
+
 class BotPlanilhaError(Exception):
     error_class: str = "UNKNOWN"
     actionable: bool = False

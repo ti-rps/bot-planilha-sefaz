@@ -1,5 +1,6 @@
 # bot_sistema_sefaz.py
 import os
+import glob
 import time
 import shutil
 from datetime import datetime
@@ -18,9 +19,33 @@ from errors import (
     CredentialInvalidError,
     IpBlockedError,
     JobTimeoutError,
+    OperationCanceled,
     PortalDownError,
     ShareUnavailableError,
 )
+
+
+# error_class de falhas que NÃO geram print de erro no share: credencial e
+# parâmetros são erros de configuração (a tela não ajuda a diagnosticar) e
+# credencial ainda vira relatório por e-mail. Demais falhas (captcha, timeout,
+# portal fora, IP, infra) ganham screenshot na pasta da empresa.
+_SEM_SCREENSHOT_SHARE = ("CREDENTIAL_INVALID", "INVALID_PARAMETERS")
+
+
+def _cancelado(cancel_event) -> bool:
+    return cancel_event is not None and cancel_event.is_set()
+
+
+def _abortar_se_cancelado(cancel_event, razao_social, ponto) -> None:
+    """Levanta OperationCanceled se o batch pediu cancelamento.
+
+    Chamada em pontos seguros (sem operação a meio caminho) para abortar a
+    empresa in-flight rápido, em vez de esperar ela terminar inteira.
+    """
+    if _cancelado(cancel_event):
+        raise OperationCanceled(
+            f"Cancelado em '{ponto}' para {razao_social}", empresa=razao_social
+        )
 
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service as ChromeService
@@ -202,8 +227,9 @@ def verificar_erro_site(driver, logger, razao_social=None):
         )
 
 def preencher_formulario(driver, wait, logger, data_inicio, data_fim, pasta_mes_ano, tipo,
-                         razao_social=None, run_id=None):
+                         razao_social=None, run_id=None, cancel_event=None):
     try:
+        _abortar_se_cancelado(cancel_event, razao_social, "antes_preencher_formulario")
         wait.until(EC.visibility_of_element_located((By.XPATH, '/html/body/table/tbody/tr/td/table[2]')))
 
         # Clicar no filtro de período
@@ -220,6 +246,7 @@ def preencher_formulario(driver, wait, logger, data_inicio, data_fim, pasta_mes_
         # Tentar resolver o captcha até 3 vezes
         tentativas = 0
         while tentativas < 3:
+            _abortar_se_cancelado(cancel_event, razao_social, "loop_captcha")
             tentativas += 1
             if resolver_captcha(wait, driver, EC, By, logger,
                                 run_id=run_id, empresa=razao_social, tipo=tipo,
@@ -287,6 +314,8 @@ def preencher_formulario(driver, wait, logger, data_inicio, data_fim, pasta_mes_
         diag.salvar_evidencia(driver, run_id, razao_social, tipo, "pos_submit_filtro", sufixo="indefinido")
         return True
 
+    except OperationCanceled:
+        raise
     except TimeoutException:
         logger.error("Erro ao preencher o formulário: elemento não encontrado")
         diag.salvar_evidencia(driver, run_id, razao_social, tipo, "preencher_formulario", sufixo="timeout")
@@ -316,7 +345,7 @@ def _download_em_progresso(nome: str) -> bool:
 
 
 def baixar_planilha(driver, wait, logger, razao_social, tipo, download_dir, data_inicio,
-                    run_id=None):
+                    run_id=None, cancel_event=None):
     try:
         logger.info("Clicando no botão para 'Gerar Planilha'")
 
@@ -331,6 +360,7 @@ def baixar_planilha(driver, wait, logger, razao_social, tipo, download_dir, data
         ultimo_snapshot = None
 
         while True:
+            _abortar_se_cancelado(cancel_event, razao_social, "espera_download")
             agora = time.time()
             decorrido = agora - start_time
 
@@ -402,6 +432,8 @@ def baixar_planilha(driver, wait, logger, razao_social, tipo, download_dir, data
 
             time.sleep(1)
 
+    except OperationCanceled:
+        raise
     except BotPlanilhaError:
         raise
     except TimeoutException:
@@ -488,6 +520,51 @@ def definir_pasta_mes_ano(razao_social, data_inicio):
     return pasta_mes_ano
 
 
+def _prefixo_erro_screenshot(tipo):
+    """Prefixo do nome do print de erro (mora ao lado do '<TIPO> SEM DADOS.png')."""
+    return f"{tipo.upper()} ERRO"
+
+
+def salvar_erro_screenshot_no_share(driver, razao_social_sanitizada, tipo, data_inicio,
+                                    error_class, logger):
+    """Salva o print do erro na pasta da empresa no share (igual ao 'SEM DADOS').
+
+    Best-effort: se o share estiver indisponível (que pode ser a própria causa
+    da falha), só loga e segue — não mascara o erro original. Sobrescreve a cada
+    tentativa, então o que sobra na pasta é o print da ÚLTIMA tentativa que falhou.
+    """
+    if driver is None:
+        return
+    try:
+        pasta_mes_ano = definir_pasta_mes_ano(razao_social_sanitizada, data_inicio)
+        nome = f"{_prefixo_erro_screenshot(tipo)} {error_class}.png"
+        caminho = os.path.join(pasta_mes_ano, nome)
+        driver.save_screenshot(caminho)
+        logger.info(f"Print de erro salvo no share: {caminho}")
+    except Exception as e:
+        logger.warning(f"Não consegui salvar o print de erro no share (seguindo): {e}")
+
+
+def limpar_erro_screenshot_do_share(razao_social_sanitizada, tipo, data_inicio, logger):
+    """Remove prints de erro antigos da pasta quando a empresa passou a dar certo.
+
+    Sem isso, uma empresa que falhou numa passe e teve sucesso na passe seguinte
+    ficaria com o CSV E o print de erro lado a lado, confundindo o operador.
+    """
+    try:
+        pasta_mes_ano = definir_pasta_mes_ano(razao_social_sanitizada, data_inicio)
+        padrao = os.path.join(pasta_mes_ano, f"{_prefixo_erro_screenshot(tipo)} *.png")
+        for caminho in glob.glob(padrao):
+            try:
+                os.remove(caminho)
+                logger.info(f"Print de erro antigo removido (empresa OK agora): {caminho}")
+            except OSError:
+                pass
+    except Exception:
+        # Limpeza é cosmética — nunca pode derrubar o caminho de sucesso.
+        pass
+
+
 def move_planilha(logger, razao_social, caminho_arquivo_baixado, data_inicio):
     try:
         diretorio_raiz = _destino_base()
@@ -519,7 +596,26 @@ def move_planilha(logger, razao_social, caminho_arquivo_baixado, data_inicio):
                 empresa=razao_social,
             ) from e
 
-        logger.info(f"Arquivo movido para: {caminho_novo_arquivo}")
+        # Confirma que o arquivo MATERIALIZOU no destino. Em share de rede
+        # (drvfs/WSL, CIFS) o move pode "voltar ok" sem persistir o arquivo —
+        # incidente 03/06: log de sucesso e CSV ausente na pasta. Sem essa
+        # checagem, o falso-sucesso vira dado fiscal silenciosamente perdido.
+        try:
+            tamanho_destino = os.path.getsize(caminho_novo_arquivo)
+        except OSError as e:
+            raise ShareUnavailableError(
+                f"Arquivo não materializou no destino '{caminho_novo_arquivo}' após o "
+                f"move (share pode ter caído no meio): {e}",
+                empresa=razao_social,
+            ) from e
+        if tamanho_destino == 0:
+            raise ShareUnavailableError(
+                f"Arquivo no destino '{caminho_novo_arquivo}' ficou com 0 bytes — "
+                f"escrita no share não persistiu.",
+                empresa=razao_social,
+            )
+
+        logger.info(f"Arquivo movido para: {caminho_novo_arquivo} ({tamanho_destino} bytes)")
     except BotPlanilhaError:
         raise
     except FileNotFoundError:
@@ -540,7 +636,7 @@ def excluir_diretorio(logger, diretorio):
         logger.error(f"Erro ao excluir o diretório {diretorio}: {e}")
 
 def download(logger, row, razao_social, login, senha, data_inicio, data_fim, dir_temp, tipo,
-             driver=None, wait=None, run_id=None):
+             driver=None, wait=None, run_id=None, cancel_event=None):
     """
     Realiza o download de arquivos do sistema SEFAZ.
     """
@@ -573,31 +669,44 @@ def download(logger, row, razao_social, login, senha, data_inicio, data_fim, dir
 
         diag.evento(run_id, razao_social_sanitizada, tipo, "abrir_site", "ok")
 
+        _abortar_se_cancelado(cancel_event, razao_social_sanitizada, "antes_login")
         fazer_login(driver_instance, razao_social_sanitizada, wait, logger,
                     login, senha, run_id=run_id, tipo=tipo)
 
         pasta_mes_ano = definir_pasta_mes_ano(razao_social_sanitizada, data_inicio)
         retornou_dados = preencher_formulario(driver_instance, wait, logger,
                                               data_inicio, data_fim, pasta_mes_ano, tipo,
-                                              razao_social=razao_social_sanitizada, run_id=run_id)
+                                              razao_social=razao_social_sanitizada, run_id=run_id,
+                                              cancel_event=cancel_event)
         if retornou_dados:
             caminho_arquivo_baixado = baixar_planilha(driver_instance, wait, logger,
                                                      razao_social_sanitizada, tipo_consulta,
-                                                     download_dir, data_inicio, run_id=run_id)
+                                                     download_dir, data_inicio, run_id=run_id,
+                                                     cancel_event=cancel_event)
             with diag.fase(run_id, razao_social_sanitizada, tipo, "mover_arquivo"):
                 move_planilha(logger, razao_social_sanitizada, caminho_arquivo_baixado, data_inicio)
+            # Empresa deu certo: remove print de erro de uma passe anterior, se houver.
+            limpar_erro_screenshot_do_share(razao_social_sanitizada, tipo, data_inicio, logger)
             diag.evento(run_id, razao_social_sanitizada, tipo, "job", "ok",
                         duracao_ms=int((time.monotonic() - inicio_job) * 1000))
             return "ok"
         else:
             logger.info(f"Nenhum dado encontrado para a consulta {tipo.upper()} da empresa {razao_social_sanitizada}.")
+            limpar_erro_screenshot_do_share(razao_social_sanitizada, tipo, data_inicio, logger)
             diag.evento(run_id, razao_social_sanitizada, tipo, "job", "ok",
                         duracao_ms=int((time.monotonic() - inicio_job) * 1000),
                         extras={"resultado": "sem_dados"})
             return "no_data"
 
+    except OperationCanceled:
+        # Cancelamento cooperativo: não é falha, não tira print nem marca fail.
+        logger.info(f"Download de {razao_social_sanitizada} (tipo: {tipo}) cancelado.")
+        diag.evento(run_id, razao_social_sanitizada, tipo, "job", "canceled",
+                    duracao_ms=int((time.monotonic() - inicio_job) * 1000))
+        raise
     except Exception as e:
         logger.error(f"Erro no processo de download para a empresa {razao_social_sanitizada} (tipo: {tipo}): {e}")
+        error_class = getattr(e, "error_class", "UNKNOWN")
         if driver_instance:
             try:
                 os.makedirs(download_dir, exist_ok=True)
@@ -606,6 +715,12 @@ def download(logger, row, razao_social, login, senha, data_inicio, data_fim, dir
                 logger.info(f"Screenshot de erro salva em: {screenshot_path}")
             except Exception as sc_e:
                 logger.error(f"Falha ao tirar screenshot do erro: {sc_e}")
+            # Print de erro TAMBÉM na pasta da empresa no share (ao lado do
+            # "SEM DADOS"), exceto credencial/parâmetros — sobrescreve a cada
+            # tentativa, então sobra o print da última falha.
+            if error_class not in _SEM_SCREENSHOT_SHARE:
+                salvar_erro_screenshot_no_share(driver_instance, razao_social_sanitizada,
+                                                tipo, data_inicio, error_class, logger)
         diag.evento(run_id, razao_social_sanitizada, tipo, "job", "fail",
                     duracao_ms=int((time.monotonic() - inicio_job) * 1000),
                     erro=f"{type(e).__name__}: {e}")
