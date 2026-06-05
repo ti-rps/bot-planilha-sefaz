@@ -115,6 +115,8 @@ EMAIL_PASSWORD=<senha-de-app-do-gmail>     # 16 chars, gerada nas configs da con
 
 | Variável | Default | O que faz |
 |----------|---------|-----------|
+| `MAX_WORKERS` | `6` | Browsers (Chromium) em paralelo no batch. **Maior alavanca de tempo.** O teto **não é CPU** (o gargalo é CAPTCHA/SEFAZ, I/O-bound) e sim a **tolerância da SEFAZ por IP** + RAM (~0,5 GB/browser). Subir **gradual** e observar IP-block — o circuit breaker abre em 3 `IP_BLOCKED` seguidos. No SRVRPS03 (12c/24t) dá pra ir a 8 se não houver block. |
+| `DOWNLOAD_TIMEOUT` | `60` | Segundos esperando o CSV baixar. Baixo demais (ex.: 30) gera `JOB_TIMEOUT` e **reprocesso na passe de retry** (login+CAPTCHA+download de novo) — 60 costuma ser **mais rápido no agregado** e mais estável. |
 | `RETRY_PASSES` | `2` | Passes extras no fim do lote para falhas transitórias (total = 1 + N tentativas). Não retenta credencial/parâmetros/IP bloqueado. |
 | `CANCELLATION_POLL_INTERVAL_S` | `5` | Frequência (s) com que o worker checa cancelamento no Maestro. Também serve de heartbeat. |
 
