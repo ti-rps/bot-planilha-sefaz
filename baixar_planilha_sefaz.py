@@ -10,7 +10,12 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import NoSuchElementException, TimeoutException
+from selenium.common.exceptions import (
+    NoSuchElementException,
+    TimeoutException,
+    StaleElementReferenceException,
+    NoAlertPresentException,
+)
 
 import diagnostico as diag
 from errors import (
@@ -127,6 +132,44 @@ def sanitizar_nome(nome):
     """
     return "".join(char for char in nome if char.isalnum() or char in " -_").strip()
 
+def _clicar_com_retry(driver, wait, locator, logger, descricao="elemento", tentativas=3):
+    """Clica num elemento RE-LOCALIZANDO a cada tentativa.
+
+    A página da SEFAZ-BA re-renderiza o widget de CAPTCHA de forma assíncrona, o
+    que deixava a referência do botão velha entre localizar e clicar
+    (StaleElementReferenceException → empresa caía como UNKNOWN). Aqui esperamos
+    o elemento ficar clicável e, se ficar stale no clique, re-localizamos.
+    """
+    ultima_exc = None
+    for i in range(tentativas):
+        try:
+            el = wait.until(EC.element_to_be_clickable(locator))
+            el.click()
+            return
+        except StaleElementReferenceException as e:
+            ultima_exc = e
+            logger.warning(f"{descricao} ficou stale ao clicar (tentativa {i + 1}/{tentativas}); re-localizando")
+            time.sleep(0.5)
+    raise ultima_exc
+
+
+def _captcha_alert_presente(driver):
+    """Se houver um alert() aberto (ex.: 'Código Captcha incorreto'), aceita e
+    devolve o texto; senão devolve None.
+
+    A SEFAZ-BA rejeita o CAPTCHA via alert() DEPOIS do submit; sem tratar, o
+    próximo comando Selenium estoura UnexpectedAlertPresentException e a empresa
+    vira UNKNOWN. Capturando o alert dá pra re-tentar o CAPTCHA no loop.
+    """
+    try:
+        alerta = driver.switch_to.alert
+        texto = alerta.text
+        alerta.accept()
+        return texto or ""
+    except NoAlertPresentException:
+        return None
+
+
 def fazer_login(driver, razao_social, wait, logger, login, senha, run_id=None, tipo=None):
     try:
         # Converter login e senha para strings
@@ -143,9 +186,12 @@ def fazer_login(driver, razao_social, wait, logger, login, senha, run_id=None, t
         campo_senha.send_keys(senha)
         logger.info(f"Senha para a empresa {razao_social} obtida.")
 
-        # Localizar e clicar no botão "Entrar"
-        btn_entrar = driver.find_element(By.XPATH, '/html/body/form/section/div[2]/div[2]/div[1]/div[2]/div/div[3]/div/label')
-        btn_entrar.click()
+        # Localizar e clicar no botão "Entrar" (com retry anti-stale).
+        _clicar_com_retry(
+            driver, wait,
+            (By.XPATH, '/html/body/form/section/div[2]/div[2]/div[1]/div[2]/div/div[3]/div/label'),
+            logger, descricao="Botão 'Entrar'",
+        )
         logger.info("Botão 'Entrar' clicado com sucesso.")
 
         try:
@@ -243,26 +289,44 @@ def preencher_formulario(driver, wait, logger, data_inicio, data_fim, pasta_mes_
         data_fim_field = wait.until(EC.presence_of_element_located((By.ID, 'txtPeriodoFinal')))
         data_fim_field.send_keys(Keys.HOME + data_fim)
 
-        # Tentar resolver o captcha até 3 vezes
+        # Resolve o CAPTCHA, submete e confirma — até 3 vezes. A SEFAZ rejeita o
+        # CAPTCHA de duas formas: (a) resolver_captcha não consegue ler, ou (b) o
+        # site abre um alert() "Código Captcha incorreto" DEPOIS do submit.
+        # Tratamos as duas no mesmo loop pra re-tentar em vez de cair como UNKNOWN.
         tentativas = 0
+        submetido = False
         while tentativas < 3:
             _abortar_se_cancelado(cancel_event, razao_social, "loop_captcha")
             tentativas += 1
-            if resolver_captcha(wait, driver, EC, By, logger,
-                                run_id=run_id, empresa=razao_social, tipo=tipo,
-                                tentativa=tentativas):
-                break
-            logger.warning(f"Tentativa {tentativas} de 3")
-            time.sleep(2)
-        else:
+            if not resolver_captcha(wait, driver, EC, By, logger,
+                                    run_id=run_id, empresa=razao_social, tipo=tipo,
+                                    tentativa=tentativas):
+                logger.warning(f"Tentativa {tentativas} de 3")
+                time.sleep(2)
+                continue
+
+            btn_consultar = wait.until(EC.presence_of_element_located((By.ID, 'AplicarFiltro')))
+            btn_consultar.click()
+
+            alerta = _captcha_alert_presente(driver)
+            if alerta is not None:
+                logger.warning(f"CAPTCHA rejeitado pela SEFAZ (tentativa {tentativas} de 3): {alerta!r}")
+                diag.evento(run_id, razao_social, tipo, "captcha", "fail",
+                            erro="captcha_incorreto_alert",
+                            extras={"tentativa": tentativas, "alerta": alerta})
+                time.sleep(2)
+                continue
+
+            submetido = True
+            break
+
+        if not submetido:
             diag.salvar_evidencia(driver, run_id, razao_social, tipo, "captcha", sufixo="esgotado")
             raise CaptchaFailedError(
                 f"Falha ao resolver CAPTCHA após 3 tentativas para {razao_social}",
                 empresa=razao_social,
             )
 
-        btn_consultar = wait.until(EC.presence_of_element_located((By.ID, 'AplicarFiltro')))
-        btn_consultar.click()
         diag.evento(run_id, razao_social, tipo, "submit_filtro", "ok")
 
         # Checagem explícita pós-submit: o site pode (a) mostrar 'lblConsultaVazia',
