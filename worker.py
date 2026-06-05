@@ -51,6 +51,7 @@ from dotenv import load_dotenv
 from gspread.exceptions import APIError
 
 import diagnostico as diag
+import email_report
 import ler_planilha as lp
 import runner
 from cancellation_watcher import CancellationWatcher
@@ -61,9 +62,10 @@ from maestro_client import MaestroClient
 load_dotenv()
 
 
-# Cadência do polling de cancelamento. 15s casa com janela de 5min do
-# retry_worker do Maestro (~20 polls de margem). Mesmo valor do bot-xml-gms.
-_CANCELLATION_POLL_INTERVAL = 15.0
+# Cadência do polling de cancelamento. Baixado de 15s p/ 5s (2026-06-05) pra o
+# cancelamento ser detectado rápido — o poll também serve de heartbeat e 5s
+# segue muito dentro da janela de 5min do retry_worker do Maestro. Configurável.
+_CANCELLATION_POLL_INTERVAL = float(os.getenv("CANCELLATION_POLL_INTERVAL_S", "5"))
 
 # Drenagem de heartbeat do RabbitMQ enquanto o batch roda. Mantém abaixo
 # do heartbeat default (600s) com folga.
@@ -384,6 +386,39 @@ class RabbitMQWorker:
 
         return result
 
+    def _talvez_enviar_email_credenciais(self, job_id, params, summary, data_inicial, data_fim):
+        """Envia (se ligado) o relatório de credenciais inválidas por e-mail.
+
+        Toggle e destinatário vêm dos PARÂMETROS da requisição HTTP (mensagem da
+        fila): `enviar_email_credenciais` (bool) e `email_credenciais_destino`
+        (str/list). SMTP fica no .env. Best-effort — qualquer erro é só logado.
+
+        NOTA cross-repo: pra o operador ligar isso pela UI, o rps-maestro precisa
+        registrar esses dois campos no parameterSchema desta automação.
+        """
+        try:
+            if not bool(params.get("enviar_email_credenciais", False)):
+                return
+            falhas = [
+                f for f in summary.get("failed", [])
+                if f.get("error_class") == "CREDENTIAL_INVALID"
+            ]
+            if not falhas:
+                return
+            destino = params.get("email_credenciais_destino") or email_report.destino_padrao()
+            enviado = email_report.enviar_relatorio_credenciais(
+                falhas, destino=destino, logger=self.logger,
+                periodo=f"{data_inicial} a {data_fim}", job_id=job_id,
+            )
+            if enviado:
+                self.client.report_log(
+                    job_id, "INFO",
+                    f"Relatório de {len(falhas)} credencial(is) inválida(s) "
+                    f"enviado por e-mail para {destino}.",
+                )
+        except Exception as e:
+            self.logger.error(f"Erro ao tentar enviar e-mail de credenciais (ignorando): {e}")
+
     def process_message(self, ch, method, properties, body):
         job_id = None
         started_at = datetime.now(timezone.utc)
@@ -480,6 +515,10 @@ class RabbitMQWorker:
             self.client.report_finish(job_id, status, result)
             self._safe_ack(ch, method)
             self.logger.info(f"Job {job_id} finalizado: status={status}")
+
+            # Relatório de credenciais inválidas por e-mail (opcional, best-effort).
+            # Depois do ack: nunca pode afetar o contrato/status do job.
+            self._talvez_enviar_email_credenciais(job_id, params, summary, data_inicial, data_fim)
 
         except json.JSONDecodeError as e:
             self.logger.error(f"JSON inválido: {e}")

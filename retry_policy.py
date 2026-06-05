@@ -32,6 +32,23 @@ _POLICY: dict[str, tuple[int, float, float]] = {
 }
 
 
+# --- Passe de retry no fim do lote (2026-06-05) ---
+# Diferente do retry inline (amber acima): a passe diferida reexecuta no FIM do
+# lote QUALQUER empresa que falhou, EXCETO estas classes. CREDENTIAL_INVALID e
+# INVALID_PARAMETERS são erros de configuração (retentar não muda nada);
+# IP_BLOCKED retentado só prolonga o bloqueio. Tudo o mais (CAPTCHA_FAILED,
+# JOB_TIMEOUT, RATE_LIMITED, PORTAL_DOWN, INFRA_DESTINO_INDISPONIVEL, UNKNOWN)
+# é transitório o suficiente pra valer uma nova tentativa minutos depois.
+PASSE_NAO_RETENTAVEL: frozenset[str] = frozenset(
+    {"CREDENTIAL_INVALID", "INVALID_PARAMETERS", "IP_BLOCKED"}
+)
+
+
+def retentavel_no_lote(error_class: str | None) -> bool:
+    """True se a empresa que falhou com `error_class` deve entrar na passe final."""
+    return error_class not in PASSE_NAO_RETENTAVEL
+
+
 def is_retryable(error_class: str | None) -> bool:
     return error_class in _POLICY
 
