@@ -22,7 +22,7 @@ def _rodar(monkeypatch, roteiro):
     """roteiro: fn(razao, n_chamada) -> dict canônico. Devolve (summary, status, ec, partial)."""
     chamadas = {}
 
-    def fake_thread(ev, di, dfim, dest, remet, df, lg, run_id=None, cancel_event=None):
+    def fake_thread(ev, di, dfim, tipo, df, lg, run_id=None, cancel_event=None):
         razao = ev[1]
         chamadas[razao] = chamadas.get(razao, 0) + 1
         return roteiro(razao, chamadas[razao])
