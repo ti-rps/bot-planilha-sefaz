@@ -58,6 +58,21 @@ Chrome em `--headless=new` via `HEADLESS=true`.
 | `remetente`    | bool        | um dos dois | false   |
 | `empresas`     | list[str]   | não         | vazio = todas com Senha Robô |
 
+#### Campo `empresas` — como informar
+
+- É uma **lista de texto** (array JSON de strings), **um identificador por item**.
+  Cada item é tratado como **string** — o worker faz `str()` antes de resolver —
+  então o código no formato `1061-1` (xxx-x) funciona normalmente (o hífen já o
+  torna texto). **Não** mande uma única string com vírgulas; tem que ser lista.
+- Cada item casa primeiro com a coluna **`Código`** da Sheet, de forma **exata**
+  (só normaliza maiúsc/minúsc e espaços). Escreva idêntico ao da planilha:
+  `1061-1` — `1061` ou `10611` **não** casam. Se não bater nenhum código, tenta
+  como **substring da `RAZÃO SOCIAL`**.
+- **Cada item precisa bater em exatamente UMA empresa.** Código duplicado na
+  Sheet → erro "ambíguo"; código inexistente → erro — em ambos o job termina
+  como `INVALID_PARAMETERS`.
+- **Vazio/ausente** = processa **todas** as empresas com `Senha Robô` preenchida.
+
 ## Desenvolvimento / execução manual
 
 ```bash
