@@ -57,6 +57,66 @@ Chrome em `--headless=new` via `HEADLESS=true`.
 | `destinatario` | bool        | um dos dois | false   |
 | `remetente`    | bool        | um dos dois | false   |
 | `empresas`     | list[str]   | não         | vazio = todas com Senha Robô |
+| `enviar_email_credenciais`  | bool      | não | false |
+| `email_credenciais_destino` | str/list  | não | `EMAIL_CREDENCIAIS_DESTINO` do `.env` |
+
+> Os dois últimos controlam o [relatório de credenciais inválidas por e-mail](#relatório-de-credenciais-inválidas-por-e-mail-opcional).
+> Para a UI do Maestro expô-los, eles precisam estar no `parameterSchema` da
+> automação (mudança no rps-maestro). O worker já trata a ausência: sem
+> `enviar_email_credenciais=true`, nada é enviado.
+
+### Relatório de credenciais inválidas por e-mail (opcional)
+
+Ao fim de um lote, as empresas que falharam no login por **usuário/senha
+inválidos** (`error_class = CREDENTIAL_INVALID`) podem ser enviadas num e-mail
+com a lista detalhada (empresa, login mascarado, horário, motivo). Útil porque
+senha errada **não é retentada** (e 3 tentativas erradas bloqueiam o IP na
+SEFAZ) — o operador recebe a lista pra corrigir na planilha.
+
+**Como ligar** (por job, via parâmetros da requisição no Maestro):
+
+- `enviar_email_credenciais: true` — liga o envio para aquele job.
+- `email_credenciais_destino: "fulano@rps.com.br"` — opcional; sobrescreve o
+  destino default. Aceita string ou lista de e-mails.
+
+**SMTP** (segredo — fica só no `.env` do worker, nunca na requisição):
+
+```bash
+SMTP_HOST=smtp.office365.com   # ou smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=conta@rps.com.br
+SMTP_PASSWORD=...              # senha de APP (Gmail/O365 com 2FA), não a senha normal
+SMTP_FROM=                     # opcional; default = SMTP_USER
+SMTP_USE_TLS=true              # STARTTLS na porta 587
+EMAIL_CREDENCIAIS_DESTINO=fiscal@rpscontabil.com.br   # default se o request não mandar
+```
+
+**Reaproveitando a conta de outro bot (ex.: BergBot):** o worker também aceita os
+nomes `EMAIL_USER` / `EMAIL_PASSWORD` (e `EMAIL_HOST` / `EMAIL_FROM`) usados pelas
+outras automações — então dá pra copiar o mesmo bloco. Sem host explícito, assume
+`smtp.gmail.com`. Ou seja, para a conta Gmail/Workspace `fiscal@`, basta:
+
+```bash
+EMAIL_USER=fiscal@rpscontabil.com.br
+EMAIL_PASSWORD=<senha-de-app-do-gmail>     # 16 chars, gerada nas configs da conta Google
+```
+
+**Comportamento / garantias:**
+
+- **Desligado por default.** Sem `enviar_email_credenciais=true`, não envia.
+- **Sem SMTP configurado** (`SMTP_HOST`/`SMTP_USER`/`SMTP_PASSWORD` vazios) → o
+  envio é **pulado** com um aviso no log; o job **não falha**.
+- **Best-effort:** qualquer erro no envio é logado e ignorado — nunca altera o
+  status do job (o e-mail sai depois do `report_finish`/ack).
+- Mexeu só no `.env`? Basta `docker compose -f docker-compose.prod.yml up -d`
+  (recria o container; **não** precisa rebuildar a imagem).
+
+### Tuning (opcional)
+
+| Variável | Default | O que faz |
+|----------|---------|-----------|
+| `RETRY_PASSES` | `2` | Passes extras no fim do lote para falhas transitórias (total = 1 + N tentativas). Não retenta credencial/parâmetros/IP bloqueado. |
+| `CANCELLATION_POLL_INTERVAL_S` | `5` | Frequência (s) com que o worker checa cancelamento no Maestro. Também serve de heartbeat. |
 
 ## Desenvolvimento / execução manual
 

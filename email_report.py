@@ -31,12 +31,25 @@ def destino_padrao() -> str:
 
 
 def _smtp_config() -> dict:
+    """Lê a config SMTP do ambiente.
+
+    Aceita tanto `SMTP_*` quanto os nomes `EMAIL_*` usados por outras automações
+    da casa (ex.: BergBot) — assim dá pra reaproveitar a MESMA conta/segredo sem
+    renomear variável. Quando não há host explícito mas há credencial, assume
+    `smtp.gmail.com` (a conta fiscal@ é Google Workspace e autentica com senha de
+    app), de modo que só `EMAIL_USER` + `EMAIL_PASSWORD` já bastam.
+    """
+    user = os.getenv("SMTP_USER") or os.getenv("EMAIL_USER")
+    password = os.getenv("SMTP_PASSWORD") or os.getenv("EMAIL_PASSWORD")
+    host = os.getenv("SMTP_HOST") or os.getenv("EMAIL_HOST")
+    if not host and user:
+        host = "smtp.gmail.com"
     return {
-        "host": os.getenv("SMTP_HOST"),
+        "host": host,
         "port": int(os.getenv("SMTP_PORT", "587")),
-        "user": os.getenv("SMTP_USER"),
-        "password": os.getenv("SMTP_PASSWORD"),
-        "from_addr": os.getenv("SMTP_FROM") or os.getenv("SMTP_USER"),
+        "user": user,
+        "password": password,
+        "from_addr": os.getenv("SMTP_FROM") or os.getenv("EMAIL_FROM") or user,
         "use_tls": os.getenv("SMTP_USE_TLS", "true").strip().lower() in ("1", "true", "yes"),
     }
 
