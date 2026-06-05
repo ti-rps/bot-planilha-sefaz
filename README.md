@@ -91,6 +91,16 @@ SMTP_USE_TLS=true              # STARTTLS na porta 587
 EMAIL_CREDENCIAIS_DESTINO=fiscal@rpscontabil.com.br   # default se o request não mandar
 ```
 
+**Reaproveitando a conta de outro bot (ex.: BergBot):** o worker também aceita os
+nomes `EMAIL_USER` / `EMAIL_PASSWORD` (e `EMAIL_HOST` / `EMAIL_FROM`) usados pelas
+outras automações — então dá pra copiar o mesmo bloco. Sem host explícito, assume
+`smtp.gmail.com`. Ou seja, para a conta Gmail/Workspace `fiscal@`, basta:
+
+```bash
+EMAIL_USER=fiscal@rpscontabil.com.br
+EMAIL_PASSWORD=<senha-de-app-do-gmail>     # 16 chars, gerada nas configs da conta Google
+```
+
 **Comportamento / garantias:**
 
 - **Desligado por default.** Sem `enviar_email_credenciais=true`, não envia.

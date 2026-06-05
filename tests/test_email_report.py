@@ -22,18 +22,21 @@ FALHAS = [
 @pytest.fixture(autouse=True)
 def _limpa_smtp_env(monkeypatch):
     for k in ("SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD", "SMTP_FROM",
-              "SMTP_PORT", "SMTP_USE_TLS", "EMAIL_CREDENCIAIS_DESTINO"):
+              "SMTP_PORT", "SMTP_USE_TLS", "EMAIL_CREDENCIAIS_DESTINO",
+              "EMAIL_HOST", "EMAIL_USER", "EMAIL_PASSWORD", "EMAIL_FROM"):
         monkeypatch.delenv(k, raising=False)
 
 
 class _FakeSMTP:
     """Context manager que finge um servidor SMTP e grava o que recebeu."""
     enviados = []
+    last = None
 
     def __init__(self, host, port, timeout=None):
         self.host, self.port = host, port
         self.started_tls = False
         self.logged = None
+        _FakeSMTP.last = self
 
     def __enter__(self):
         return self
@@ -87,3 +90,20 @@ def test_envia_com_smtp_fake(monkeypatch):
     assert "EMP A" in corpo and "EMP B" in corpo
     assert "****99" in corpo            # login mascarado no corpo
     assert "01/05/2026 a 31/05/2026" in corpo
+
+
+def test_reaproveita_credenciais_email_user_password(monkeypatch):
+    # Só EMAIL_USER/EMAIL_PASSWORD (convenção do BergBot), sem SMTP_*: deve
+    # funcionar e assumir smtp.gmail.com como host por padrão.
+    monkeypatch.setenv("EMAIL_USER", "fiscal@rpscontabil.com.br")
+    monkeypatch.setenv("EMAIL_PASSWORD", "senha-de-app")
+    _FakeSMTP.enviados.clear()
+    monkeypatch.setattr(email_report.smtplib, "SMTP", _FakeSMTP)
+
+    ok = email_report.enviar_relatorio_credenciais(
+        FALHAS, destino="fiscal@rpscontabil.com.br", logger=logger,
+    )
+    assert ok is True
+    assert _FakeSMTP.last.host == "smtp.gmail.com"        # default p/ Gmail
+    assert _FakeSMTP.last.logged == ("fiscal@rpscontabil.com.br", "senha-de-app")
+    assert _FakeSMTP.enviados[0]["From"] == "fiscal@rpscontabil.com.br"
