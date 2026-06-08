@@ -67,7 +67,9 @@ def resolver_captcha(wait, driver, EC, By, logger,
             f.write(base64.b64decode(img_base64))
 
         captcha_text = solve_image_captcha(captcha_path)
-        logger.info(f"CAPTCHA resolvido: {captcha_text}")
+        # Não logar o texto do CAPTCHA em claro (ia pro log diário E pro
+        # diagnostico-*.jsonl). Só o tamanho — suficiente pra diagnóstico.
+        logger.debug(f"CAPTCHA resolvido ({len(captcha_text)} chars).")
 
         campo = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, '#txt_cod_antirobo')))
         campo.clear()
@@ -76,7 +78,7 @@ def resolver_captcha(wait, driver, EC, By, logger,
         diag.evento(run_id, empresa, tipo, "captcha", "ok",
                     tentativa=tentativa,
                     duracao_ms=int((time.monotonic() - inicio) * 1000),
-                    extras={"texto_resolvido": captcha_text,
+                    extras={"captcha_len": len(captcha_text),
                             "src_tipo": "base64" if 'base64' in src else "screenshot"})
         return True
 
