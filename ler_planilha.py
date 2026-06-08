@@ -84,5 +84,5 @@ def get_senha(logger, row):
 
 def get_isContribuinte(logger, row):
     logger.info(f"Contribuinte: {row['Contribuinte']}")
-    isContribuinte = row['Senha Robô']
+    isContribuinte = row['Contribuinte']
     return isContribuinte

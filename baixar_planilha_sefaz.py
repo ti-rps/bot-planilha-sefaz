@@ -22,6 +22,7 @@ from errors import (
     BotPlanilhaError,
     CaptchaFailedError,
     CredentialInvalidError,
+    InvalidParametersError,
     IpBlockedError,
     JobTimeoutError,
     OperationCanceled,
@@ -67,8 +68,8 @@ def configurar_driver(logger, download_dir):
     try:
         options = ChromeOptions()
 
-        options.add_argument('--ignore-certificate-errors')
-        options.add_argument('--ignore-ssl-errors')
+        # SSL NÃO é ignorado de propósito: o portal SEFAZ-BA tem cert válido e
+        # ignorar abriria MITM/injeção no Chromium headless.
         options.add_argument('--disable-popup-blocking')
         options.add_argument("--window-size=1920,1080")
         options.add_argument("--start-maximized")
@@ -543,16 +544,20 @@ def verificar_download(caminho_arquivo_baixado, timeout=10):
         raise FileNotFoundError(f"O arquivo {caminho_arquivo_baixado} não foi encontrado.")
 
 def verificar_arquivo_em_uso(arquivo):
-    """Verifica se o arquivo está em uso por outro processo."""
+    """True se o arquivo existe mas está bloqueado/em escrita por outro processo.
+
+    Arquivo AUSENTE devolve False (não está "em uso") — antes devolvia True, o
+    que invertia a semântica e podia mascarar um CSV que sumiu no caminho.
+    """
     if not os.path.exists(arquivo):
-        return True
+        return False
 
     try:
         # Tenta abrir o arquivo para ver se ele está bloqueado
         with open(arquivo, 'r'):
             pass
         return False
-    except Exception:
+    except OSError:
         return True
     
 def _destino_base():
@@ -707,6 +712,13 @@ def download(logger, row, razao_social, login, senha, data_inicio, data_fim, dir
     download_dir = os.path.join('downloads', dir_temp)
     driver_instance = None
     razao_social_sanitizada = sanitizar_nome(razao_social)
+    # Razão social só com caracteres removidos vira "" e colapsaria o path da
+    # pasta da empresa (base/"/ano -> base/ano), gravando no lugar errado.
+    if not razao_social_sanitizada:
+        raise InvalidParametersError(
+            f"Razão social inválida (vazia após sanitizar): {razao_social!r}",
+            empresa=str(razao_social),
+        )
     inicio_job = time.monotonic()
 
     diag.evento(run_id, razao_social_sanitizada, tipo, "job", "start",
