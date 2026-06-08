@@ -16,6 +16,7 @@ WORKER_PATH_MODULES = [
     "ler_planilha",
     "empresa_resolver",
     "captcha_solver",
+    "sefaz_selectors",
     "baixar_planilha_sefaz",
     "runner",
     "maestro_client",

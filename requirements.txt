@@ -23,5 +23,8 @@ pika
 # CAPTCHA solving library/service client
 capsolver
 
+# Selectors do portal externalizados (config/selectors.yaml)
+PyYAML
+
 # GUI Calendar widget for tkinter
 tkcalendar

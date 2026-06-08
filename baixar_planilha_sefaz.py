@@ -18,6 +18,7 @@ from selenium.common.exceptions import (
 )
 
 import diagnostico as diag
+from sefaz_selectors import SELECTORS
 from errors import (
     BotPlanilhaError,
     CaptchaFailedError,
@@ -177,26 +178,26 @@ def fazer_login(driver, razao_social, wait, logger, login, senha, run_id=None, t
         senha = str(senha)
 
         # Localizar e preencher o campo de login
-        campo_login = wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, '[id="PHCentro_userLogin"]')))
+        campo_login = wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, SELECTORS["login"]["usuario"])))
         campo_login.send_keys(login)
         logger.info(f"Login para a empresa {razao_social} obtido.")
 
         # Localizar e preencher o campo de senha
-        campo_senha = wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, '[id="PHCentro_userPass"]')))
+        campo_senha = wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, SELECTORS["login"]["senha"])))
         campo_senha.send_keys(senha)
         logger.info(f"Senha para a empresa {razao_social} obtida.")
 
         # Localizar e clicar no botão "Entrar" (com retry anti-stale).
         _clicar_com_retry(
             driver, wait,
-            (By.XPATH, '/html/body/form/section/div[2]/div[2]/div[1]/div[2]/div/div[3]/div/label'),
+            (By.XPATH, SELECTORS["login"]["botao_entrar"]),
             logger, descricao="Botão 'Entrar'",
         )
         logger.info("Botão 'Entrar' clicado com sucesso.")
 
         try:
             WebDriverWait(driver, 2).until(
-                EC.visibility_of_element_located((By.ID, 'msgDetalhesErro'))
+                EC.visibility_of_element_located((By.ID, SELECTORS["login"]["msg_erro"]))
             )
         except TimeoutException:
             logger.info("Login realizado com sucesso")
@@ -276,17 +277,17 @@ def preencher_formulario(driver, wait, logger, data_inicio, data_fim, pasta_mes_
                          razao_social=None, run_id=None, cancel_event=None):
     try:
         _abortar_se_cancelado(cancel_event, razao_social, "antes_preencher_formulario")
-        wait.until(EC.visibility_of_element_located((By.XPATH, '/html/body/table/tbody/tr/td/table[2]')))
+        wait.until(EC.visibility_of_element_located((By.XPATH, SELECTORS["formulario"]["tabela"])))
 
         # Clicar no filtro de período
-        filtro_periodo = wait.until(EC.presence_of_element_located((By.XPATH, '//*[@id="rbt_filtro3"]')))
+        filtro_periodo = wait.until(EC.presence_of_element_located((By.XPATH, SELECTORS["formulario"]["filtro_periodo"])))
         filtro_periodo.click()
 
         # Preencher datas
-        data_inicio_field = wait.until(EC.presence_of_element_located((By.ID, 'txtPeriodoInicial')))
+        data_inicio_field = wait.until(EC.presence_of_element_located((By.ID, SELECTORS["formulario"]["data_inicial"])))
         data_inicio_field.send_keys(Keys.HOME + data_inicio)
 
-        data_fim_field = wait.until(EC.presence_of_element_located((By.ID, 'txtPeriodoFinal')))
+        data_fim_field = wait.until(EC.presence_of_element_located((By.ID, SELECTORS["formulario"]["data_final"])))
         data_fim_field.send_keys(Keys.HOME + data_fim)
 
         # Resolve o CAPTCHA, submete e confirma — até 3 vezes. A SEFAZ rejeita o
@@ -305,7 +306,7 @@ def preencher_formulario(driver, wait, logger, data_inicio, data_fim, pasta_mes_
                 time.sleep(2)
                 continue
 
-            btn_consultar = wait.until(EC.presence_of_element_located((By.ID, 'AplicarFiltro')))
+            btn_consultar = wait.until(EC.presence_of_element_located((By.ID, SELECTORS["formulario"]["btn_aplicar"])))
             btn_consultar.click()
 
             alerta = _captcha_alert_presente(driver)
@@ -339,14 +340,14 @@ def preencher_formulario(driver, wait, logger, data_inicio, data_fim, pasta_mes_
 
         while time.monotonic() - inicio_pos_submit < timeout_pos_submit:
             try:
-                el_vazio = driver.find_element(By.ID, 'lblConsultaVazia')
+                el_vazio = driver.find_element(By.ID, SELECTORS["formulario"]["consulta_vazia"])
                 if el_vazio.is_displayed():
                     resultado_pos_submit = "vazio"
                     break
             except NoSuchElementException:
                 pass
             try:
-                el_ger = driver.find_element(By.ID, 'btn_GerarPlanilha')
+                el_ger = driver.find_element(By.ID, SELECTORS["formulario"]["btn_gerar_planilha"])
                 if el_ger.is_displayed():
                     resultado_pos_submit = "ok"
                     break
@@ -414,7 +415,7 @@ def baixar_planilha(driver, wait, logger, razao_social, tipo, download_dir, data
         logger.info("Clicando no botão para 'Gerar Planilha'")
 
         # Clicar no botão para gerar a planilha
-        btn_gerar_planilha = wait.until(EC.presence_of_element_located((By.ID, 'btn_GerarPlanilha')))
+        btn_gerar_planilha = wait.until(EC.presence_of_element_located((By.ID, SELECTORS["formulario"]["btn_gerar_planilha"])))
         btn_gerar_planilha.click()
         diag.evento(run_id, razao_social, tipo, "gerar_planilha_click", "ok")
 
