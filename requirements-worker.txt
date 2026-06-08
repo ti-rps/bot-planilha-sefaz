@@ -26,3 +26,6 @@ pika
 
 # Resolução de CAPTCHA
 capsolver
+
+# Selectors do portal externalizados (config/selectors.yaml)
+PyYAML

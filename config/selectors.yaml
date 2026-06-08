@@ -1,0 +1,28 @@
+# Selectors do portal SEFAZ-BA, externalizados (2026-06-08).
+#
+# Quando o portal muda de layout (causa raiz dos stale/quebras), edite AQUI —
+# sem mexer em código nem rebuildar lógica. Inspirado no config/selectors.yaml
+# do bot-xml-gms (arquitetura de referência).
+#
+# O TIPO do seletor (By.ID / By.CSS_SELECTOR / By.XPATH) continua no código,
+# ao lado do uso; aqui fica só o VALOR — que é o que costuma quebrar.
+# Carregado por sefaz_selectors.py.
+
+login:
+  usuario: '[id="PHCentro_userLogin"]'      # By.CSS_SELECTOR
+  senha: '[id="PHCentro_userPass"]'         # By.CSS_SELECTOR
+  # XPath absoluto e FRÁGIL — primeiro candidato a quebrar num reflow do portal.
+  botao_entrar: /html/body/form/section/div[2]/div[2]/div[1]/div[2]/div/div[3]/div/label  # By.XPATH
+  msg_erro: msgDetalhesErro                 # By.ID (aparece em login inválido)
+
+formulario:
+  tabela: /html/body/table/tbody/tr/td/table[2]   # By.XPATH (frágil)
+  filtro_periodo: '//*[@id="rbt_filtro3"]'         # By.XPATH
+  data_inicial: txtPeriodoInicial                  # By.ID
+  data_final: txtPeriodoFinal                      # By.ID
+  btn_aplicar: AplicarFiltro                       # By.ID
+  consulta_vazia: lblConsultaVazia                 # By.ID
+  btn_gerar_planilha: btn_GerarPlanilha            # By.ID
+
+# captcha (img_captcha / txt_cod_antirobo) ainda vive em captcha_solver.py —
+# externalizar numa próxima etapa, junto da quebra em page_objects.
