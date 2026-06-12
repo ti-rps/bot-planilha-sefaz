@@ -113,6 +113,9 @@ def test_validar_parametros_ok(make_worker):
 @pytest.mark.parametrize("params", [
     {"data_fim": "31/05/2026", "destinatario": True},                    # falta data_inicial
     {"data_inicial": "1/5/26", "data_fim": "31/05/2026", "destinatario": True},  # formato
+    {"data_inicial": "01/13/2025", "data_fim": "31/12/2025", "destinatario": True},  # mês inexistente
+    {"data_inicial": "31/05/2026", "data_fim": "01/05/2026", "destinatario": True},  # período invertido
+    {"data_inicial": "01/12/2099", "data_fim": "31/12/2099", "destinatario": True},  # início no futuro (virada de ano)
     {"data_inicial": "01/05/2026", "data_fim": "31/05/2026"},            # nem dest nem remet
     {"data_inicial": "01/05/2026", "data_fim": "31/05/2026", "destinatario": True, "empresas": "ABC"},  # empresas não-lista
 ])

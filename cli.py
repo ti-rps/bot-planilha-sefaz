@@ -31,7 +31,6 @@ import argparse
 import json
 import logging
 import os
-import re
 import sys
 import time
 
@@ -39,9 +38,7 @@ import diagnostico as diag
 import ler_planilha as lp
 import runner
 from empresa_resolver import resolver_empresas
-
-
-_DATE_PATTERN = re.compile(r"^\d{2}/\d{2}/\d{4}$")
+from validacao_datas import validar_periodo
 
 
 def configurar_logger(verbose: bool) -> logging.Logger:
@@ -84,10 +81,10 @@ def parse_args():
 def main():
     args = parse_args()
 
-    if not _DATE_PATTERN.match(args.data_inicial):
-        sys.exit(f"ERRO: --data-inicial '{args.data_inicial}' não é dd/MM/yyyy")
-    if not _DATE_PATTERN.match(args.data_fim):
-        sys.exit(f"ERRO: --data-fim '{args.data_fim}' não é dd/MM/yyyy")
+    try:
+        validar_periodo(args.data_inicial, args.data_fim)
+    except ValueError as e:
+        sys.exit(f"ERRO: {e}")
     if not (args.destinatario or args.remetente):
         sys.exit("ERRO: precisa de --destinatario e/ou --remetente")
     if not args.empresas and not args.all:
