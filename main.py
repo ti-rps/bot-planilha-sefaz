@@ -12,6 +12,8 @@ import diagnostico as diag
 import runner
 import queue
 
+from validacao_datas import validar_periodo
+
 from dotenv import load_dotenv
 from tkinter import ttk
 from tkinter import messagebox
@@ -287,12 +289,14 @@ def mostrar_menu():
 
     def validar_datas_gui():
         try:
-            data_inicial_val = data_inicial_entry.get_date()
-            data_final_val = data_final_entry.get_date()
-            if data_inicial_val > data_final_val:
-                raise ValueError("A data inicial não pode ser maior que a data final.")
+            # Reusa a regra compartilhada (período não invertido + início fora
+            # do futuro = guarda contra erro de virada de ano). O DateEntry
+            # devolve date; formatamos pra dd/MM/yyyy que validar_periodo espera.
+            di = data_inicial_entry.get_date().strftime("%d/%m/%Y")
+            dfim = data_final_entry.get_date().strftime("%d/%m/%Y")
+            validar_periodo(di, dfim)
             return True
-        except ValueError as ve: # Captura o erro de get_date se a data for inválida
+        except ValueError as ve:
             messagebox.showerror("Erro de Data", f"Data inválida: {ve}")
             return False
     
