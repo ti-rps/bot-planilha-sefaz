@@ -57,6 +57,7 @@ import runner
 from cancellation_watcher import CancellationWatcher
 from empresa_resolver import resolver_empresas
 from maestro_client import MaestroClient
+from validacao_datas import validar_periodo
 
 
 load_dotenv()
@@ -255,10 +256,14 @@ class RabbitMQWorker:
 
         if not data_inicial or not data_fim:
             raise JobValidationError("Campos obrigatórios faltando: data_inicial, data_fim")
-        if not isinstance(data_inicial, str) or len(data_inicial) != 10 or data_inicial[2] != "/" or data_inicial[5] != "/":
-            raise JobValidationError(f"data_inicial '{data_inicial}' não está no formato dd/MM/yyyy")
-        if not isinstance(data_fim, str) or len(data_fim) != 10 or data_fim[2] != "/" or data_fim[5] != "/":
-            raise JobValidationError(f"data_fim '{data_fim}' não está no formato dd/MM/yyyy")
+        # Validação semântica (não só formato): data existente, período não
+        # invertido e início fora do futuro — pega o erro de virada de ano
+        # ANTES de abrir navegador, em vez de estourar ValueError por empresa
+        # lá no strptime de definir_pasta_mes_ano.
+        try:
+            validar_periodo(data_inicial, data_fim)
+        except ValueError as e:
+            raise JobValidationError(str(e)) from e
         if not (destinatario or remetente):
             raise JobValidationError("Precisa de pelo menos um: destinatario ou remetente")
         if not isinstance(empresas_raw, list):
