@@ -410,6 +410,60 @@ def _download_em_progresso(nome: str) -> bool:
     )
 
 
+def _finalizar_download_se_pronto(download_dir, razao_social, tipo, data_inicio,
+                                  run_id, logger, start_time, *, exigir_dir_limpo=True):
+    """Se há um CSV finalizado no diretório, renomeia pro nome canônico e devolve
+    o caminho final; caso contrário devolve None.
+
+    `exigir_dir_limpo=True` (uso no loop de espera): só conclui quando NÃO há
+    temporário de download pendente — comportamento conservador do incidente
+    03/06 (não confundir o `.org.chromium.Chromium.XXXX` em escrita com o CSV).
+
+    `exigir_dir_limpo=False` (uso na salvaguarda de timeout): aceita o CSV mesmo
+    com algum dotfile residual no diretório. No incidente ARPEC (12/06) o CSV já
+    estava completo no diretório no instante do timeout, mas o loop nunca o
+    reconheceu como conclusão — sem esta salvaguarda, um download que materializa
+    bem no fim da janela vira falso JOB_TIMEOUT.
+    """
+    arquivos = os.listdir(download_dir)
+    em_progresso = [a for a in arquivos if _download_em_progresso(a)]
+    finalizados = [a for a in arquivos
+                   if not _download_em_progresso(a) and a.lower().endswith('.csv')]
+
+    if not finalizados:
+        return None
+    if exigir_dir_limpo and em_progresso:
+        return None
+
+    arquivo_baixado = os.path.join(download_dir, finalizados[0])
+    if verificar_arquivo_em_uso(arquivo_baixado):
+        return None
+
+    time.sleep(1)
+    tamanho = os.path.getsize(arquivo_baixado) if os.path.exists(arquivo_baixado) else 0
+    mes_ano_consulta = datetime.strptime(data_inicio, "%d/%m/%Y").strftime("%m%Y")
+    nome_arquivo_novo = f"{tipo.upper()} {mes_ano_consulta} {razao_social.upper()}.csv"
+    novo_caminho = os.path.join(download_dir, nome_arquivo_novo)
+
+    try:
+        os.rename(arquivo_baixado, novo_caminho)
+    except FileNotFoundError:
+        logger.error(f"Arquivo não encontrado para renomeação: {arquivo_baixado}")
+        raise
+    except PermissionError:
+        logger.error(f"Erro de permissão ao renomear o arquivo {arquivo_baixado}. O arquivo está em uso.")
+        raise
+
+    diag.evento(run_id, razao_social, tipo, "aguardar_download", "ok",
+                duracao_ms=int((time.time() - start_time) * 1000),
+                extras={"arquivo_origem": finalizados[0],
+                        "arquivo_final": nome_arquivo_novo,
+                        "tamanho_bytes": tamanho,
+                        "via_salvaguarda": not exigir_dir_limpo})
+    logger.info(f"Arquivo renomeado para {nome_arquivo_novo} com sucesso.")
+    return novo_caminho
+
+
 def baixar_planilha(driver, wait, logger, razao_social, tipo, download_dir, data_inicio,
                     run_id=None, cancel_event=None):
     try:
@@ -432,6 +486,19 @@ def baixar_planilha(driver, wait, logger, razao_social, tipo, download_dir, data
 
             # Verifica se o tempo de espera foi excedido
             if decorrido > timeout:
+                # Salvaguarda: o CSV pode ter materializado bem no fim da janela
+                # (SEFAZ gera a planilha no servidor e só então baixa; sob carga
+                # isso encosta no limite). Antes de declarar timeout, tenta
+                # finalizar uma última vez aceitando dotfile residual — evita
+                # falso JOB_TIMEOUT com o arquivo já pronto no diretório (ARPEC 12/06).
+                salvaguarda = _finalizar_download_se_pronto(
+                    download_dir, razao_social, tipo, data_inicio,
+                    run_id, logger, start_time, exigir_dir_limpo=False)
+                if salvaguarda:
+                    logger.warning("Download concluído na salvaguarda de timeout "
+                                   f"(decorrido {decorrido:.1f}s > limite {timeout}s).")
+                    return salvaguarda
+
                 snapshot = _listar_diretorio_download(download_dir)
                 diag.evento(run_id, razao_social, tipo, "aguardar_download", "timeout",
                             duracao_ms=int(decorrido * 1000),
@@ -464,37 +531,13 @@ def baixar_planilha(driver, wait, logger, razao_social, tipo, download_dir, data
             if chave_snapshot != ultimo_snapshot and (int(decorrido) % 5 == 0):
                 ultimo_snapshot = chave_snapshot
 
-            # Só considera download concluído quando NÃO há temporário pendente
-            # e já existe o CSV finalizado.
-            if finalizados and not em_progresso:
-                arquivo_baixado = os.path.join(download_dir, finalizados[0])
-
-                if not verificar_arquivo_em_uso(arquivo_baixado):
-                    time.sleep(1)
-
-                    tamanho = os.path.getsize(arquivo_baixado) if os.path.exists(arquivo_baixado) else 0
-
-                    mes_ano_consulta = datetime.strptime(data_inicio, "%d/%m/%Y").strftime("%m%Y")
-                    tipo_upper = tipo.upper()
-                    razao_social_upper = razao_social.upper()
-                    nome_arquivo_novo = f"{tipo_upper} {mes_ano_consulta} {razao_social_upper}.csv"
-                    novo_caminho = os.path.join(download_dir, nome_arquivo_novo)
-
-                    try:
-                        os.rename(arquivo_baixado, novo_caminho)
-                        diag.evento(run_id, razao_social, tipo, "aguardar_download", "ok",
-                                    duracao_ms=int((time.time() - start_time) * 1000),
-                                    extras={"arquivo_origem": finalizados[0],
-                                            "arquivo_final": nome_arquivo_novo,
-                                            "tamanho_bytes": tamanho})
-                        logger.info(f"Arquivo renomeado para {nome_arquivo_novo} com sucesso.")
-                        return novo_caminho
-                    except FileNotFoundError:
-                        logger.error(f"Arquivo não encontrado para renomeação: {arquivo_baixado}")
-                        raise
-                    except PermissionError:
-                        logger.error(f"Erro de permissão ao renomear o arquivo {arquivo_baixado}. O arquivo está em uso.")
-                        raise
+            # Conclui quando há CSV finalizado e nenhum temporário pendente
+            # (exigir_dir_limpo=True preserva o cuidado do incidente 03/06).
+            caminho_final = _finalizar_download_se_pronto(
+                download_dir, razao_social, tipo, data_inicio,
+                run_id, logger, start_time, exigir_dir_limpo=True)
+            if caminho_final:
+                return caminho_final
 
             time.sleep(1)
 
