@@ -609,7 +609,7 @@ def _destino_base():
     # Em WSL/container, aponte pro mountpoint do share SRVDOC01\REDE\FISCAL.
     # Valida existência antes de criar subpastas, senão em Linux o makedirs
     # cria silenciosamente uma pasta "R:" no cwd quando o share não está montado.
-    base = os.getenv("DESTINO_BASE", r"R:\FISCAL\00 PLANILHA SEFAZ")
+    base = os.getenv("DESTINO_BASE", r"R:\FISCAL\00 DOCUMENTOS SEFAZ")
     if not os.path.isdir(base):
         raise ShareUnavailableError(
             f"DESTINO_BASE não existe ou não é diretório: '{base}'. "

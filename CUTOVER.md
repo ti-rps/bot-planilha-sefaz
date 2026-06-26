@@ -16,7 +16,7 @@ Antes de qualquer job real, conferir nesta ordem:
 
 | # | Item | Comando / verificação | Falha = |
 |---|------|----------------------|---------|
-| 1 | **Share CIFS** `\\SRVDOC01\REDE\FISCAL` montado | `mountpoint /mnt/fiscal && ls "/mnt/fiscal/00 PLANILHA SEFAZ"` | Decisão #11 não cumprida — corrigir `/etc/fstab` antes. |
+| 1 | **Share CIFS** `\\SRVDOC01\REDE\FISCAL` montado | `mountpoint /mnt/fiscal && ls "/mnt/fiscal/00 DOCUMENTOS SEFAZ"` | Decisão #11 não cumprida — corrigir `/etc/fstab` antes. |
 | 2 | **Migration 000009** (`job_logs.actionable`) aplicada no DB do Maestro | `psql ... -c "\d job_logs"` (coluna `actionable boolean` presente) | Reports com `actionable=true` quebram — coordenar com time do Maestro. |
 | 3 | **Credencial Google** em `./credentials/citric-nimbus-436114-g8-daacef9f0900.json` | `ls credentials/` | Sem isso o worker falha no primeiro `_ensure_df`. |
 | 4 | **`.env`** preenchido a partir de [`.env.example`](.env.example) | Conferir `MAESTRO_API_URL`, `MAESTRO_RABBITMQ_*`, `API_KEY` (Capsolver), `GOOGLE_SHEET_URL`, `SEFAZ_DEST`, `SEFAZ_REMET` | Worker sobe mas não conecta — ou pior, conecta mas sem captcha. |
@@ -35,7 +35,7 @@ exata):
 | Campo | Valor |
 |-------|-------|
 | **Nome** | `bot-planilha-sefaz` |
-| **Descrição** | Baixa planilha consolidada de NFes do portal SEFAZ-BA por empresa e move para o share `\\SRVDOC01\REDE\FISCAL\00 PLANILHA SEFAZ\<EMPRESA>\<YYYY>\<MMYYYY>\` |
+| **Descrição** | Baixa planilha consolidada de NFes do portal SEFAZ-BA por empresa e move para o share `\\SRVDOC01\REDE\FISCAL\00 DOCUMENTOS SEFAZ\<EMPRESA>\<YYYY>\<MMYYYY>\` |
 | **Queue name** | `bot-planilha-tasks` |
 | **Worker API key** | mesma chave que está em `MAESTRO_WORKER_API_KEY` no `.env` do worker (ou vazio em dev) |
 | **parameterSchema** | ver §3 |
@@ -155,7 +155,7 @@ publica isto manualmente):
   `noHeartbeat`).
 - `report_finish` com `status=completed` (ou `completed_no_invoices` se a
   empresa não emitiu nada no dia).
-- Arquivo aparece em `/mnt/fiscal/00 PLANILHA SEFAZ/<EMPRESA>/<YYYY>/<MMYYYY>/`
+- Arquivo aparece em `/mnt/fiscal/00 DOCUMENTOS SEFAZ/<EMPRESA>/<YYYY>/<MMYYYY>/`
   com formato `DESTINATÁRIO <MMYYYY> <EMPRESA>.csv`.
 - Idempotência: rerodar o mesmo `job_id` (via cancel + retry no painel)
   e ver o segundo dispatch ackear sem reprocessar (log `Descartando redelivery`).
