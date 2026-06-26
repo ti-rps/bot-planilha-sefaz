@@ -37,7 +37,7 @@ services:
       CHROME_BINARY: /usr/bin/chromium
       CHROMEDRIVER_PATH: /usr/bin/chromedriver
       # /share = mountpoint do \\SRVDOC01\REDE\FISCAL (ver volume abaixo).
-      DESTINO_BASE: /share/00 PLANILHA SEFAZ
+      DESTINO_BASE: /share/00 DOCUMENTOS SEFAZ
       GOOGLE_CREDENTIALS_FILE: /run/credentials/google-sa.json
       # Conexão com o rps-maestro. Defaults assumem o broker/API no próprio host.
       MAESTRO_API_URL: ${MAESTRO_API_URL:-http://host.docker.internal:8080}
